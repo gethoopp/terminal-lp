@@ -56,6 +56,30 @@ impl SortDirection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeSignal {
+    GoodEntry,
+    Watchlist,
+    Avoid,
+}
+
+impl TradeSignal {
+    pub fn label(&self) -> &'static str {
+        match self {
+            TradeSignal::GoodEntry => "LAYAK MASUK",
+            TradeSignal::Watchlist => "PANTAU",
+            TradeSignal::Avoid => "HINDARI",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PairAssessment {
+    pub signal: TradeSignal,
+    pub score: i32,
+    pub notes: Vec<String>,
+}
+
 pub struct App {
     pub pairs: Vec<PairData>,
     pub filtered_pairs: Vec<usize>,
@@ -238,6 +262,10 @@ impl App {
             .map(|&i| &self.pairs[i])
     }
 
+    pub fn selected_assessment(&self) -> Option<PairAssessment> {
+        self.selected_pair().map(assess_pair)
+    }
+
     pub fn move_selection_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
@@ -280,6 +308,92 @@ fn parse_usd(s: &Option<String>) -> f64 {
     s.as_ref()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0)
+}
+
+pub fn assess_pair(pair: &PairData) -> PairAssessment {
+    let change_24h = pair
+        .price_change
+        .as_ref()
+        .and_then(|pc| pc.h24)
+        .unwrap_or(0.0);
+    let change_1h = pair
+        .price_change
+        .as_ref()
+        .and_then(|pc| pc.h1)
+        .unwrap_or(0.0);
+    let change_5m = pair
+        .price_change
+        .as_ref()
+        .and_then(|pc| pc.m5)
+        .unwrap_or(0.0);
+    let vol_24h = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+    let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
+    let vol_liq_ratio = if liquidity > 0.0 {
+        vol_24h / liquidity
+    } else {
+        0.0
+    };
+
+    let mut score = 50;
+    let mut notes = Vec::new();
+
+    if liquidity >= 150_000.0 {
+        score += 12;
+        notes.push("Likuiditas kuat, risiko slippage lebih rendah.".to_string());
+    } else if liquidity < 20_000.0 {
+        score -= 20;
+        notes.push("Likuiditas tipis, slippage dan wick bisa tinggi.".to_string());
+    }
+
+    if vol_24h >= 500_000.0 {
+        score += 10;
+        notes.push("Volume 24h tinggi, market aktif.".to_string());
+    } else if vol_24h < 50_000.0 {
+        score -= 12;
+        notes.push("Volume rendah, setup kurang valid.".to_string());
+    }
+
+    if (5.0..=35.0).contains(&change_24h) && (0.5..=8.0).contains(&change_1h) && change_5m > -2.0 {
+        score += 18;
+        notes.push("Momentum naik sehat (24h + 1h selaras).".to_string());
+    } else if change_24h > 60.0 && change_1h < 0.0 {
+        score -= 18;
+        notes.push("Potensi blow-off: naik tajam tapi 1h mulai melemah.".to_string());
+    } else if change_24h < -12.0 && change_1h < 0.0 {
+        score -= 20;
+        notes.push("Trend turun berlanjut, sebaiknya hindari entry dulu.".to_string());
+    } else if change_24h.abs() < 3.0 && change_1h.abs() < 1.0 {
+        score -= 6;
+        notes.push("Pergerakan datar, belum ada konfirmasi arah.".to_string());
+    }
+
+    if vol_liq_ratio >= 0.7 && vol_liq_ratio <= 8.0 {
+        score += 8;
+        notes.push("Rasio volume/likuiditas sehat untuk eksekusi.".to_string());
+    } else if vol_liq_ratio > 15.0 {
+        score -= 10;
+        notes.push("Volume terlalu agresif vs likuiditas, rawan volatilitas ekstrem.".to_string());
+    }
+
+    score = score.clamp(0, 100);
+
+    let signal = if score >= 67 {
+        TradeSignal::GoodEntry
+    } else if score >= 45 {
+        TradeSignal::Watchlist
+    } else {
+        TradeSignal::Avoid
+    };
+
+    if notes.is_empty() {
+        notes.push("Data belum cukup untuk sinyal kuat.".to_string());
+    }
+
+    PairAssessment {
+        signal,
+        score,
+        notes,
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +455,25 @@ mod tests {
         assert_eq!(app.filtered_pairs.len(), 1);
         let selected = app.selected_pair().expect("pair should exist");
         assert_eq!(selected.base_token.symbol.as_deref(), Some("AAA"));
+    }
+
+    #[test]
+    fn assess_pair_returns_good_entry_on_healthy_momentum() {
+        let pair = sample_pair("MOMO", 900_000.0, 300_000.0);
+        let assessed = assess_pair(&pair);
+        assert_eq!(assessed.signal, TradeSignal::GoodEntry);
+        assert!(assessed.score >= 67);
+    }
+
+    #[test]
+    fn assess_pair_returns_avoid_on_weak_setup() {
+        let mut pair = sample_pair("WEAK", 20_000.0, 8_000.0);
+        if let Some(change) = pair.price_change.as_mut() {
+            change.h24 = Some(-30.0);
+            change.h1 = Some(-8.0);
+        }
+        let assessed = assess_pair(&pair);
+        assert_eq!(assessed.signal, TradeSignal::Avoid);
+        assert!(assessed.score < 45);
     }
 }

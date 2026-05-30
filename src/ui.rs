@@ -1,4 +1,4 @@
-use crate::app::{App, SortColumn, SortDirection};
+use crate::app::{assess_pair, App, PairAssessment, SortColumn, SortDirection, TradeSignal};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -17,13 +17,22 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
-            Constraint::Min(3),    // table
+            Constraint::Min(10),   // table + analysis
             Constraint::Length(3), // footer
         ])
         .split(frame.area());
 
+    let body_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(6),    // table
+            Constraint::Length(8), // analysis
+        ])
+        .split(main_layout[1]);
+
     render_header(frame, main_layout[0], app);
-    render_table(frame, main_layout[1], app);
+    render_table(frame, body_layout[0], app);
+    render_analysis(frame, body_layout[1], app);
     render_footer(frame, main_layout[2], app);
 }
 
@@ -106,6 +115,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(14), // volume
         Constraint::Length(14), // liquidity
         Constraint::Length(14), // FDV
+        Constraint::Length(13), // signal
     ];
 
     let table = Table::new(rows, widths)
@@ -140,6 +150,7 @@ fn build_header(app: &App) -> Row<'static> {
         Cell::from(format!("Vol 24h{}", sort_marker(SortColumn::Volume24h))),
         Cell::from(format!("Liquidity{}", sort_marker(SortColumn::Liquidity))),
         Cell::from(format!("FDV{}", sort_marker(SortColumn::FDV))),
+        Cell::from("Signal"),
     ])
 }
 
@@ -163,6 +174,8 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
             let volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
             let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
             let fdv = pair.fdv.unwrap_or(0.0);
+            let assessment = assess_pair(pair);
+            let signal_style = signal_style(assessment.signal);
 
             Row::new(vec![
                 Cell::from(symbol.to_uppercase())
@@ -173,9 +186,22 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
                 Cell::from(format_usd(volume)),
                 Cell::from(format_usd(liquidity)),
                 Cell::from(format_usd(fdv)),
+                Cell::from(assessment.signal.label()).style(signal_style),
             ])
         })
         .collect()
+}
+
+fn signal_style(signal: TradeSignal) -> Style {
+    match signal {
+        TradeSignal::GoodEntry => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        TradeSignal::Watchlist => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        TradeSignal::Avoid => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
 }
 
 fn change_cell(value: f64) -> Text<'static> {
@@ -229,6 +255,58 @@ fn format_usd(value: f64) -> String {
     } else {
         String::from("--")
     }
+}
+
+fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
+    let content = if let Some(pair) = app.selected_pair() {
+        let assessment = app.selected_assessment().unwrap_or_else(|| PairAssessment {
+            signal: TradeSignal::Watchlist,
+            score: 50,
+            notes: vec!["Data analisa belum tersedia.".to_string()],
+        });
+
+        let symbol = pair
+            .base_token
+            .symbol
+            .as_deref()
+            .unwrap_or("???")
+            .to_uppercase();
+        let name = pair.base_token.name.as_deref().unwrap_or("-");
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
+                Span::styled(symbol, Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!(" ({})", name)),
+            ]),
+            Line::from(vec![
+                Span::styled("Rekomendasi: ", Style::default().fg(Color::Cyan)),
+                Span::styled(assessment.signal.label(), signal_style(assessment.signal)),
+                Span::raw(format!("  |  Score: {}/100", assessment.score)),
+            ]),
+        ];
+
+        for note in assessment.notes.iter().take(3) {
+            lines.push(Line::from(format!("- {}", note)));
+        }
+
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Analisa Grafik (Heuristik) "),
+            )
+            .style(Style::default().fg(Color::White))
+    } else {
+        Paragraph::new("Belum ada pair yang dipilih.")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Analisa Grafik "),
+            )
+            .style(Style::default().fg(Color::DarkGray))
+    };
+
+    frame.render_widget(content, area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -322,6 +400,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Vol 24h       24-hour volume in USD"),
         Line::from("  Liquidity     Total liquidity in USD"),
         Line::from("  FDV           Fully diluted valuation"),
+        Line::from("  Signal        Rekomendasi heuristik (Layak Masuk / Pantau / Hindari)"),
         Line::from(""),
         Line::from(Span::styled(
             " Auto-refresh: every 15 seconds",
