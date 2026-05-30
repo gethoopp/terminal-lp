@@ -3,9 +3,12 @@ mod app;
 mod ui;
 
 use app::App;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
+
+type FetchMessage = Result<api::FetchResult, String>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,23 +23,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
+    let client = api::build_http_client().map_err(std::io::Error::other)?;
+    let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel::<FetchMessage>();
+    let mut fetch_in_flight = false;
 
-    // Initial data fetch
-    fetch_and_update(&mut app).await;
+    // Initial data fetch in background to keep UI responsive.
+    request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
 
     let tick_rate = Duration::from_millis(200);
     let refresh_rate = Duration::from_secs(15);
-    let mut last_refresh = std::time::Instant::now();
+    let mut last_refresh = Instant::now();
 
     loop {
+        drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Auto-refresh
-        if last_refresh.elapsed() >= refresh_rate && !app.show_help {
-            app.is_loading = true;
-            terminal.draw(|frame| ui::render(frame, &app))?;
-            fetch_and_update(&mut app).await;
-            last_refresh = std::time::Instant::now();
+        if last_refresh.elapsed() >= refresh_rate && !app.show_help && !fetch_in_flight {
+            request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
+            last_refresh = Instant::now();
         }
 
         // Handle input with timeout
@@ -56,17 +61,17 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     continue;
                 }
 
+                if app.search_mode {
+                    handle_search_key(&mut app, key);
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Char('h') => app.toggle_help(),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let visible = terminal
-                            .size()?
-                            .height
-                            .saturating_sub(7) as usize; // header + footer + borders
-                        app.move_selection_down(visible.max(5));
-                    }
+                    KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
                     KeyCode::Right => {
                         app.sort_column = app.sort_column.next();
                         app.apply_filters();
@@ -95,55 +100,23 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Enter => {
                         if let Some(pair) = app.selected_pair() {
                             if let Some(ref url) = pair.url {
-                                let _ = std::process::Command::new("open")
-                                    .arg(url)
-                                    .spawn();
+                                if let Err(err) = open::that(url) {
+                                    app.set_warning(format!("Failed to open URL: {}", err));
+                                }
                             }
                         }
                     }
                     KeyCode::Char('s') => {
-                        // Simple search: read next chars as query
-                        app.search_query.clear();
-                        app.apply_filters();
-                        terminal.draw(|frame| ui::render(frame, &app))?;
-
-                        // Read search input
-                        loop {
-                            if event::poll(Duration::from_millis(500))? {
-                                if let Event::Key(k) = event::read()? {
-                                    if k.kind != KeyEventKind::Press {
-                                        continue;
-                                    }
-                                    match k.code {
-                                        KeyCode::Enter => break,
-                                        KeyCode::Esc => {
-                                            app.search_query.clear();
-                                            break;
-                                        }
-                                        KeyCode::Backspace => {
-                                            app.search_query.pop();
-                                            app.apply_filters();
-                                        }
-                                        KeyCode::Char(c) => {
-                                            app.search_query.push(c);
-                                            app.apply_filters();
-                                        }
-                                        _ => {}
-                                    }
-                                    terminal.draw(|frame| ui::render(frame, &app))?;
-                                }
-                            } else {
-                                break; // timeout
-                            }
-                        }
-                        terminal.draw(|frame| ui::render(frame, &app))?;
+                        app.start_search();
                     }
                     KeyCode::Char('R') => {
                         // Force refresh
-                        app.is_loading = true;
-                        terminal.draw(|frame| ui::render(frame, &app))?;
-                        fetch_and_update(&mut app).await;
-                        last_refresh = std::time::Instant::now();
+                        if !fetch_in_flight {
+                            request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
+                            last_refresh = Instant::now();
+                        } else {
+                            app.set_warning(String::from("Refresh already in progress"));
+                        }
                     }
                     _ => {}
                 }
@@ -154,14 +127,73 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-async fn fetch_and_update(app: &mut App) {
+fn request_fetch(
+    client: &reqwest::Client,
+    fetch_tx: &UnboundedSender<FetchMessage>,
+    fetch_in_flight: &mut bool,
+    app: &mut App,
+) {
+    if *fetch_in_flight {
+        return;
+    }
+
+    *fetch_in_flight = true;
     app.is_loading = true;
-    match api::fetch_volatile_pairs().await {
-        Ok(pairs) => {
-            app.update_pairs(pairs);
+    app.set_warning(String::from("Fetching data from DexScreener..."));
+
+    let tx = fetch_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(api::fetch_volatile_pairs(&client).await);
+    });
+}
+
+fn drain_fetch_results(
+    fetch_rx: &mut UnboundedReceiver<FetchMessage>,
+    app: &mut App,
+    fetch_in_flight: &mut bool,
+) {
+    loop {
+        match fetch_rx.try_recv() {
+            Ok(result) => {
+                *fetch_in_flight = false;
+                match result {
+                    Ok(data) => {
+                        app.update_pairs(data.pairs);
+                        if !data.warnings.is_empty() {
+                            app.set_warning(format!(
+                                "Loaded with warnings: {}",
+                                data.warnings.join(" | ")
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        app.set_error(e);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                *fetch_in_flight = false;
+                app.set_error(String::from("Background fetch channel disconnected"));
+                break;
+            }
         }
-        Err(e) => {
-            app.set_error(e);
+    }
+}
+
+fn handle_search_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => app.stop_search_keep_query(),
+        KeyCode::Esc => app.stop_search_clear_query(),
+        KeyCode::Backspace => {
+            app.search_query.pop();
+            app.apply_filters();
         }
+        KeyCode::Char(c) => {
+            app.search_query.push(c);
+            app.apply_filters();
+        }
+        _ => {}
     }
 }

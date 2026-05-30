@@ -16,9 +16,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Min(3),     // table
-            Constraint::Length(3),  // footer
+            Constraint::Length(3), // header
+            Constraint::Min(3),    // table
+            Constraint::Length(3), // footer
         ])
         .split(frame.area());
 
@@ -42,7 +42,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let header = Paragraph::new(title)
-        .block(Block::default().borders(Borders::ALL).border_style(header_style))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(header_style),
+        )
         .style(header_style)
         .alignment(Alignment::Left);
 
@@ -61,7 +65,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(ref err) = app.error_message {
         let error = Paragraph::new(format!("Error: {}", err))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red)))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red)),
+            )
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::Red));
         frame.render_widget(error, area);
@@ -69,9 +77,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     if app.filtered_pairs.is_empty() {
-        let empty = Paragraph::new("No pairs match your filters. Try lowering min volume / liquidity or clearing search.")
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center);
+        let empty = Paragraph::new(
+            "No pairs match your filters. Try lowering min volume / liquidity or clearing search.",
+        )
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center);
         frame.render_widget(empty, area);
         return;
     }
@@ -81,25 +91,27 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut table_state = TableState::default().with_selected(Some(app.selected_index));
 
-    let header_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let highlight_style = Style::default()
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
 
     let widths = [
-        Constraint::Length(10),  // symbol
-        Constraint::Length(12),  // price
-        Constraint::Length(8),   // 1h %
-        Constraint::Length(9),   // 24h %
-        Constraint::Length(14),  // volume
-        Constraint::Length(14),  // liquidity
-        Constraint::Length(14),  // FDV
+        Constraint::Length(10), // symbol
+        Constraint::Length(12), // price
+        Constraint::Length(8),  // 1h %
+        Constraint::Length(9),  // 24h %
+        Constraint::Length(14), // volume
+        Constraint::Length(14), // liquidity
+        Constraint::Length(14), // FDV
     ];
 
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({}) — ↑↓ scroll | ← → sort col | s search | +/- vol/liq filter | h help | q quit ",
+            " Pairs ({}) — ↑↓ scroll | ← → sort col | s search mode | +/- vol/liq filter | h help | q quit ",
             app.filtered_pairs.len()
         )))
         .row_highlight_style(highlight_style)
@@ -136,11 +148,7 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
         .iter()
         .map(|&idx| {
             let pair = &app.pairs[idx];
-            let symbol = pair
-                .base_token
-                .symbol
-                .as_deref()
-                .unwrap_or("???");
+            let symbol = pair.base_token.symbol.as_deref().unwrap_or("???");
             let price = format_price(&pair.price_usd);
             let change_1h = pair
                 .price_change
@@ -157,7 +165,8 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
             let fdv = pair.fdv.unwrap_or(0.0);
 
             Row::new(vec![
-                Cell::from(symbol.to_uppercase()).style(Style::default().add_modifier(Modifier::BOLD)),
+                Cell::from(symbol.to_uppercase())
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 Cell::from(price),
                 Cell::from(change_cell(change_1h)),
                 Cell::from(change_cell(change_24h)),
@@ -186,10 +195,7 @@ fn change_cell(value: f64) -> Text<'static> {
         " "
     };
 
-    Text::from(Span::styled(
-        format!("{} {:>6.2}%", arrow, value),
-        style,
-    ))
+    Text::from(Span::styled(format!("{} {:>6.2}%", arrow, value), style))
 }
 
 fn format_price(price: &Option<String>) -> String {
@@ -266,6 +272,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    if app.search_mode {
+        spans.push(Span::raw("  |  "));
+        spans.push(Span::styled(
+            "SEARCH MODE (Enter keep / Esc clear)",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let footer = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(Color::Gray));
@@ -277,7 +293,9 @@ fn render_help(frame: &mut Frame) {
     let help_text = vec![
         Line::from(Span::styled(
             " Volatile Scanner — Help ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(" Data sourced from DexScreener API — free, public DEX aggregator"),
@@ -287,10 +305,12 @@ fn render_help(frame: &mut Frame) {
         Line::from("  ↑ / ↓         Navigate pair list"),
         Line::from("  ← / →         Change sort column"),
         Line::from("  r             Reverse sort direction"),
-        Line::from("  s             Enter search mode (type token name/symbol, Enter to apply)"),
+        Line::from("  s             Enter search mode (type token name/symbol, Enter to keep)"),
+        Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
         Line::from("  [ / ]         Decrease / increase min liquidity filter ($500 step)"),
         Line::from("  Enter         Open pair URL in browser (if available)"),
+        Line::from("  Ctrl+C        Quit"),
         Line::from("  h             Toggle this help screen"),
         Line::from("  q / Esc       Quit"),
         Line::from(""),
@@ -321,4 +341,26 @@ fn render_help(frame: &mut Frame) {
         .alignment(Alignment::Left);
 
     frame.render_widget(help, frame.area());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_price, format_usd};
+
+    #[test]
+    fn format_price_handles_ranges() {
+        assert_eq!(format_price(&Some("12.34567".to_string())), "$12.3457");
+        assert_eq!(
+            format_price(&Some("0.123456789".to_string())),
+            "$0.12345679"
+        );
+        assert_eq!(format_price(&None), "--");
+    }
+
+    #[test]
+    fn format_usd_uses_compact_suffixes() {
+        assert_eq!(format_usd(1_500.0), "$1.50K");
+        assert_eq!(format_usd(2_500_000.0), "$2.50M");
+        assert_eq!(format_usd(0.0), "--");
+    }
 }

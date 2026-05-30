@@ -1,4 +1,7 @@
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
 
 const DEXSCREENER_API: &str = "https://api.dexscreener.com/latest/dex";
 
@@ -28,6 +31,8 @@ pub struct PairData {
     pub fdv: Option<f64>,
     #[serde(rename = "pairCreatedAt")]
     pub pair_created_at: Option<u64>,
+    #[serde(rename = "pairAddress")]
+    pub pair_address: Option<String>,
     pub url: Option<String>,
 }
 
@@ -60,13 +65,21 @@ pub struct LiquidityData {
     pub usd: Option<f64>,
 }
 
-/// Fetch top volatile pairs from DexScreener for a given search query (e.g. token address or name)
-pub async fn search_pairs(query: &str) -> Result<Vec<PairData>, String> {
-    let url = format!("{}/search?q={}", DEXSCREENER_API, query);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+pub struct FetchResult {
+    pub pairs: Vec<PairData>,
+    pub warnings: Vec<String>,
+}
+
+pub fn build_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("Failed to build client: {}", e))?;
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+/// Fetch top volatile pairs from DexScreener for a given search query (e.g. token address or name)
+async fn search_pairs(client: &reqwest::Client, query: &str) -> Result<Vec<PairData>, String> {
+    let url = format!("{}/search?q={}", DEXSCREENER_API, query);
 
     let resp = client
         .get(&url)
@@ -76,6 +89,9 @@ pub async fn search_pairs(query: &str) -> Result<Vec<PairData>, String> {
         .map_err(|e| format!("Request failed: {}", e))?;
 
     if !resp.status().is_success() {
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err("API rate limit hit (429)".to_string());
+        }
         return Err(format!("API returned status: {}", resp.status()));
     }
 
@@ -86,30 +102,91 @@ pub async fn search_pairs(query: &str) -> Result<Vec<PairData>, String> {
     Ok(data.pairs.unwrap_or_default())
 }
 
-/// Fetch trending pairs on Solana (by searching common base tokens)
-pub async fn fetch_volatile_pairs() -> Result<Vec<PairData>, String> {
-    // Search for Solana pairs - broad search to catch volatile tokens
-    let mut all_pairs: Vec<PairData> = Vec::new();
+async fn search_pairs_with_retry(
+    client: &reqwest::Client,
+    query: &str,
+    max_retries: usize,
+) -> Result<Vec<PairData>, String> {
+    let mut backoff = Duration::from_millis(300);
+    let mut last_error = String::from("Unknown error");
 
-    // Multiple queries to catch different volatile segments
-    let queries = vec!["SOL", "USDC", "BONK", "WIF", "JUP", "RAY"];
-
-    for query in queries {
-        match search_pairs(query).await {
-            Ok(pairs) => {
-                for pair in pairs {
-                    if pair.chain_id == "solana" {
-                        all_pairs.push(pair);
-                    }
+    for attempt in 0..=max_retries {
+        match search_pairs(client, query).await {
+            Ok(pairs) => return Ok(pairs),
+            Err(err) => {
+                last_error = err;
+                if attempt < max_retries {
+                    sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
                 }
-            }
-            Err(e) => {
-                eprintln!("Warning: search '{}' failed: {}", query, e);
             }
         }
     }
 
-    // Deduplicate by pair address (using base token symbol as key)
+    Err(last_error)
+}
+
+fn pair_identity(pair: &PairData) -> String {
+    pair.pair_address
+        .clone()
+        .or_else(|| pair.url.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}:{}",
+                pair.chain_id,
+                pair.dex_id,
+                pair.base_token.symbol.as_deref().unwrap_or(""),
+                pair.quote_token.symbol.as_deref().unwrap_or("")
+            )
+        })
+}
+
+/// Fetch trending pairs on Solana (by searching common base tokens)
+pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResult, String> {
+    // Search for Solana pairs - broad search to catch volatile tokens
+    let mut best_by_pair: HashMap<String, PairData> = HashMap::new();
+    let mut warnings = Vec::new();
+
+    // Multiple queries to catch different volatile segments
+    let queries = ["SOL", "USDC", "BONK", "WIF", "JUP", "RAY"];
+
+    for (idx, query) in queries.iter().enumerate() {
+        match search_pairs_with_retry(client, query, 1).await {
+            Ok(pairs) => {
+                for pair in pairs {
+                    if pair.chain_id == "solana" {
+                        let key = pair_identity(&pair);
+                        let incoming_vol = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+
+                        match best_by_pair.get(&key) {
+                            Some(existing) => {
+                                let existing_vol =
+                                    existing.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+                                if incoming_vol > existing_vol {
+                                    best_by_pair.insert(key, pair);
+                                }
+                            }
+                            None => {
+                                best_by_pair.insert(key, pair);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warnings.push(format!("search '{}' failed: {}", query, e));
+            }
+        }
+
+        // Throttle requests to reduce API rate-limit risk.
+        if idx + 1 < queries.len() {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    let mut all_pairs: Vec<PairData> = best_by_pair.into_values().collect();
+
+    // Keep top 100 by volume first.
     all_pairs.sort_by(|a, b| {
         let vol_a = a.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
         let vol_b = b.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
@@ -138,5 +215,8 @@ pub async fn fetch_volatile_pairs() -> Result<Vec<PairData>, String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Ok(all_pairs)
+    Ok(FetchResult {
+        pairs: all_pairs,
+        warnings,
+    })
 }
