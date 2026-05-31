@@ -2,7 +2,7 @@ mod api;
 mod app;
 mod ui;
 
-use app::App;
+use app::{App, BotCloseInput, BotOpenInput, BotPosition};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
@@ -11,12 +11,26 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     DefaultTerminal, Frame,
 };
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
 
 type FetchMessage = Result<api::FetchResult, String>;
+type BotMessage = Result<BotTaskResult, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+const BOT_API_BASE_URL: &str = "http://localhost:20128/v1";
+const BOT_API_KEY: &str = "REPLACE_WITH_LOCAL_BOT_API_KEY";
+
+enum BotTaskResult {
+    Opened(BotPosition),
+    Closed {
+        symbol: String,
+        current_price: f64,
+        pnl_pct: f64,
+        reason: String,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,23 +121,35 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     let mut app = App::new();
     let client = api::build_http_client().map_err(std::io::Error::other)?;
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel::<FetchMessage>();
+    let (bot_tx, mut bot_rx) = mpsc::unbounded_channel::<BotMessage>();
     let mut fetch_in_flight = false;
+    let mut bot_in_flight = false;
 
     // Initial data fetch in background to keep UI responsive.
     request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
 
     let tick_rate = Duration::from_millis(200);
     let refresh_rate = Duration::from_secs(15);
+    let bot_check_rate = Duration::from_secs(2);
     let mut last_refresh = Instant::now();
+    let mut last_bot_check = Instant::now();
 
     loop {
         drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
+        drain_bot_results(&mut bot_rx, &mut app, &mut bot_in_flight);
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Auto-refresh
         if last_refresh.elapsed() >= refresh_rate && !app.show_help && !fetch_in_flight {
             request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
             last_refresh = Instant::now();
+        }
+
+        if last_bot_check.elapsed() >= bot_check_rate && !bot_in_flight {
+            if let Some(payload) = app.auto_take_profit_input() {
+                request_bot_close(&client, &bot_tx, &mut bot_in_flight, payload);
+            }
+            last_bot_check = Instant::now();
         }
 
         // Handle input with timeout
@@ -208,6 +234,33 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Char('W') => {
                         app.toggle_watchlist_only();
                     }
+                    KeyCode::Char('b') => app.toggle_bot_enabled(),
+                    KeyCode::Char('p') => {
+                        if bot_in_flight {
+                            app.set_warning(String::from("Bot action still running"));
+                            continue;
+                        }
+                        if let Some(payload) = app.selected_pair_for_bot_open() {
+                            request_bot_open(&client, &bot_tx, &mut bot_in_flight, payload);
+                        } else {
+                            app.set_warning(String::from(
+                                "Cannot open bot position (already open or invalid selected pair)",
+                            ));
+                        }
+                    }
+                    KeyCode::Char('t') => {
+                        if bot_in_flight {
+                            app.set_warning(String::from("Bot action still running"));
+                            continue;
+                        }
+                        if let Some(payload) =
+                            app.close_input_for_active_position("manual_take_profit")
+                        {
+                            request_bot_close(&client, &bot_tx, &mut bot_in_flight, payload);
+                        } else {
+                            app.set_warning(String::from("No active bot position to close"));
+                        }
+                    }
                     KeyCode::Char('s') => {
                         app.start_search();
                     }
@@ -280,6 +333,205 @@ fn drain_fetch_results(
             }
         }
     }
+}
+
+fn request_bot_open(
+    client: &reqwest::Client,
+    bot_tx: &UnboundedSender<BotMessage>,
+    bot_in_flight: &mut bool,
+    payload: BotOpenInput,
+) {
+    if *bot_in_flight {
+        return;
+    }
+    *bot_in_flight = true;
+
+    let tx = bot_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let result = execute_bot_open(&client, payload).await;
+        let _ = tx.send(result);
+    });
+}
+
+fn request_bot_close(
+    client: &reqwest::Client,
+    bot_tx: &UnboundedSender<BotMessage>,
+    bot_in_flight: &mut bool,
+    payload: BotCloseInput,
+) {
+    if *bot_in_flight {
+        return;
+    }
+    *bot_in_flight = true;
+
+    let tx = bot_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let result = execute_bot_close(&client, payload).await;
+        let _ = tx.send(result);
+    });
+}
+
+fn drain_bot_results(
+    bot_rx: &mut UnboundedReceiver<BotMessage>,
+    app: &mut App,
+    bot_in_flight: &mut bool,
+) {
+    loop {
+        match bot_rx.try_recv() {
+            Ok(result) => {
+                *bot_in_flight = false;
+                match result {
+                    Ok(BotTaskResult::Opened(position)) => {
+                        app.set_bot_opened(position);
+                    }
+                    Ok(BotTaskResult::Closed {
+                        symbol,
+                        current_price,
+                        pnl_pct,
+                        reason,
+                    }) => {
+                        app.set_bot_closed(&symbol, current_price, pnl_pct, &reason);
+                    }
+                    Err(err) => {
+                        app.set_bot_error("REQUEST", &err);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                *bot_in_flight = false;
+                app.set_bot_error("CHANNEL", "Bot channel disconnected");
+                break;
+            }
+        }
+    }
+}
+
+async fn execute_bot_open(
+    client: &reqwest::Client,
+    payload: BotOpenInput,
+) -> Result<BotTaskResult, String> {
+    let body = json!({
+        "pairKey": payload.pair_key,
+        "pairAddress": payload.pair_address,
+        "symbol": payload.symbol,
+        "baseMint": payload.base_mint,
+        "quoteMint": payload.quote_mint,
+        "entryPrice": payload.entry_price,
+        "sizeUsd": payload.position_size_usd,
+        "takeProfitPct": payload.take_profit_pct,
+        "source": "haliim-terminal"
+    });
+
+    let response = post_bot_with_fallback(
+        client,
+        &["positions/open", "position/open", "trade/open"],
+        &body,
+    )
+    .await?;
+
+    let target_price = payload.entry_price * (1.0 + payload.take_profit_pct / 100.0);
+    let position_id = extract_string(&response, &["positionId", "id"]);
+    let position = BotPosition {
+        pair_key: payload.pair_key,
+        pair_address: payload.pair_address,
+        symbol: payload.symbol,
+        entry_price: payload.entry_price,
+        target_price,
+        take_profit_pct: payload.take_profit_pct,
+        opened_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+        provider_position_id: position_id,
+    };
+
+    Ok(BotTaskResult::Opened(position))
+}
+
+async fn execute_bot_close(
+    client: &reqwest::Client,
+    payload: BotCloseInput,
+) -> Result<BotTaskResult, String> {
+    let body = json!({
+        "pairKey": payload.pair_key,
+        "pairAddress": payload.pair_address,
+        "symbol": payload.symbol,
+        "entryPrice": payload.entry_price,
+        "exitPrice": payload.current_price,
+        "positionId": payload.provider_position_id,
+        "reason": payload.reason,
+        "source": "haliim-terminal"
+    });
+
+    post_bot_with_fallback(
+        client,
+        &["positions/close", "position/close", "trade/close"],
+        &body,
+    )
+    .await?;
+
+    let pnl_pct = ((payload.current_price - payload.entry_price) / payload.entry_price) * 100.0;
+    Ok(BotTaskResult::Closed {
+        symbol: payload.symbol,
+        current_price: payload.current_price,
+        pnl_pct,
+        reason: payload.reason,
+    })
+}
+
+async fn post_bot_with_fallback(
+    client: &reqwest::Client,
+    endpoints: &[&str],
+    body: &Value,
+) -> Result<Value, String> {
+    let mut last_error = String::from("Unknown bot API error");
+
+    for endpoint in endpoints {
+        let url = format!("{}/{}", BOT_API_BASE_URL.trim_end_matches('/'), endpoint);
+        let response = client
+            .post(&url)
+            .header("X-API-Key", BOT_API_KEY)
+            .header("Authorization", format!("Bearer {BOT_API_KEY}"))
+            .json(body)
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                let parsed = resp
+                    .json::<Value>()
+                    .await
+                    .unwrap_or_else(|_| json!({ "ok": true }));
+                return Ok(parsed);
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                last_error = format!("{endpoint} failed with {status}: {text}");
+            }
+            Err(err) => {
+                last_error = format!("{endpoint} request error: {err}");
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(v) = value.get(key).and_then(|raw| raw.as_str()) {
+            return Some(v.to_string());
+        }
+        if let Some(v) = value
+            .get("data")
+            .and_then(|data| data.get(key))
+            .and_then(|raw| raw.as_str())
+        {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 fn handle_search_key(app: &mut App, key: KeyEvent) {

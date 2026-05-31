@@ -370,7 +370,25 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("Microstructure: ", Style::default().fg(Color::Cyan)),
                 Span::raw(microstructure_summary.to_string()),
             ]),
+            Line::from(vec![
+                Span::styled("Bot: ", Style::default().fg(Color::Cyan)),
+                Span::raw(app.bot_status.clone()),
+            ]),
         ];
+
+        if let Some(position) = app.bot_active_position.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled("Posisi Aktif: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{} | entry ${:.8} | target ${:.8} ({:.2}%) | buka {}",
+                    position.symbol,
+                    position.entry_price,
+                    position.target_price,
+                    position.take_profit_pct,
+                    position.opened_at
+                )),
+            ]));
+        }
 
         for note in shown_notes {
             lines.push(Line::from(format!("- {note}")));
@@ -421,6 +439,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" watchlist  "),
         Span::styled("W", Style::default().fg(Color::Cyan)),
         Span::raw(" watchlist only  "),
+        Span::styled("b", Style::default().fg(Color::Cyan)),
+        Span::raw(" bot on/off  "),
+        Span::styled("p", Style::default().fg(Color::Cyan)),
+        Span::raw(" place  "),
+        Span::styled("t", Style::default().fg(Color::Cyan)),
+        Span::raw(" TP close  "),
         Span::styled("+/-", Style::default().fg(Color::Cyan)),
         Span::raw(" vol filter  "),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -460,6 +484,15 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled(
         if app.watchlist_only { "ON" } else { "OFF" },
         if app.watchlist_only {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    ));
+    spans.push(Span::raw("  BOT: "));
+    spans.push(Span::styled(
+        if app.bot_enabled { "ON" } else { "OFF" },
+        if app.bot_enabled {
             Style::default().fg(Color::Green)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -521,6 +554,9 @@ fn render_help(frame: &mut Frame) {
         Line::from("  s             Enter search mode (type token name/symbol, Enter to keep)"),
         Line::from("  w             Toggle selected pair in watchlist (persisted local JSON)"),
         Line::from("  W             Toggle watchlist-only mode"),
+        Line::from("  b             Toggle bot mode ON/OFF"),
+        Line::from("  p             Place position via local Meteora bot API"),
+        Line::from("  t             Manual take-profit close for active bot position"),
         Line::from("  o             Open mode: pilih tujuan link pair"),
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
@@ -529,6 +565,9 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Enter         Open pair in Meteora"),
         Line::from("  m             (di Open mode) buka Meteora"),
         Line::from("  d             (di Open mode) buka DexScreener"),
+        Line::from(
+            "  Bot API       Base URL http://localhost:20128/v1 (API key hardcoded placeholder)",
+        ),
         Line::from("  Ctrl+C        Quit"),
         Line::from("  h             Toggle this help screen"),
         Line::from("  q / Esc       Quit"),

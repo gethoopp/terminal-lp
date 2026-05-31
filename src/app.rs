@@ -138,6 +138,41 @@ pub struct PairAssessment {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BotPosition {
+    pub pair_key: String,
+    pub pair_address: Option<String>,
+    pub symbol: String,
+    pub entry_price: f64,
+    pub target_price: f64,
+    pub take_profit_pct: f64,
+    pub opened_at: String,
+    pub provider_position_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BotOpenInput {
+    pub pair_key: String,
+    pub pair_address: Option<String>,
+    pub symbol: String,
+    pub base_mint: Option<String>,
+    pub quote_mint: Option<String>,
+    pub entry_price: f64,
+    pub take_profit_pct: f64,
+    pub position_size_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BotCloseInput {
+    pub pair_key: String,
+    pub pair_address: Option<String>,
+    pub symbol: String,
+    pub entry_price: f64,
+    pub current_price: f64,
+    pub provider_position_id: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct WatchlistStore {
     pairs: Vec<String>,
@@ -161,6 +196,11 @@ pub struct App {
     pub open_link_mode: bool,
     pub watchlist_only: bool,
     watchlist: HashSet<String>,
+    pub bot_enabled: bool,
+    pub bot_take_profit_pct: f64,
+    pub bot_position_size_usd: f64,
+    pub bot_active_position: Option<BotPosition>,
+    pub bot_status: String,
     pub is_loading: bool,
     pub show_help: bool,
     pub error_message: Option<String>,
@@ -187,6 +227,11 @@ impl App {
             open_link_mode: false,
             watchlist_only: false,
             watchlist,
+            bot_enabled: false,
+            bot_take_profit_pct: 5.0,
+            bot_position_size_usd: 25.0,
+            bot_active_position: None,
+            bot_status: String::from("BOT OFF"),
             is_loading: true,
             show_help: false,
             error_message: None,
@@ -479,6 +524,110 @@ impl App {
         self.apply_filters();
     }
 
+    pub fn toggle_bot_enabled(&mut self) {
+        self.bot_enabled = !self.bot_enabled;
+        if self.bot_enabled {
+            self.bot_status = format!(
+                "BOT ON | TP {:.2}% | Size ${:.2}",
+                self.bot_take_profit_pct, self.bot_position_size_usd
+            );
+        } else {
+            self.bot_status = String::from("BOT OFF");
+        }
+    }
+
+    pub fn selected_pair_for_bot_open(&self) -> Option<BotOpenInput> {
+        if self.bot_active_position.is_some() {
+            return None;
+        }
+
+        let pair = self.selected_pair()?;
+        let entry_price = pair_price_usd(pair)?;
+        if entry_price <= 0.0 {
+            return None;
+        }
+
+        Some(BotOpenInput {
+            pair_key: pair_watch_key(pair),
+            pair_address: pair.pair_address.clone(),
+            symbol: pair
+                .base_token
+                .symbol
+                .as_deref()
+                .unwrap_or("UNKNOWN")
+                .to_string(),
+            base_mint: pair.base_token.address.clone(),
+            quote_mint: pair.quote_token.address.clone(),
+            entry_price,
+            take_profit_pct: self.bot_take_profit_pct,
+            position_size_usd: self.bot_position_size_usd,
+        })
+    }
+
+    pub fn close_input_for_active_position(&self, reason: &str) -> Option<BotCloseInput> {
+        let position = self.bot_active_position.as_ref()?;
+        let pair = self
+            .pairs
+            .iter()
+            .find(|pair| pair_watch_key(pair) == position.pair_key)?;
+        let current_price = pair_price_usd(pair)?;
+
+        Some(BotCloseInput {
+            pair_key: position.pair_key.clone(),
+            pair_address: position.pair_address.clone(),
+            symbol: position.symbol.clone(),
+            entry_price: position.entry_price,
+            current_price,
+            provider_position_id: position.provider_position_id.clone(),
+            reason: reason.to_string(),
+        })
+    }
+
+    pub fn auto_take_profit_input(&self) -> Option<BotCloseInput> {
+        if !self.bot_enabled {
+            return None;
+        }
+
+        let position = self.bot_active_position.as_ref()?;
+        let pair = self
+            .pairs
+            .iter()
+            .find(|pair| pair_watch_key(pair) == position.pair_key)?;
+        let current_price = pair_price_usd(pair)?;
+        if current_price < position.target_price {
+            return None;
+        }
+
+        Some(BotCloseInput {
+            pair_key: position.pair_key.clone(),
+            pair_address: position.pair_address.clone(),
+            symbol: position.symbol.clone(),
+            entry_price: position.entry_price,
+            current_price,
+            provider_position_id: position.provider_position_id.clone(),
+            reason: String::from("auto_take_profit"),
+        })
+    }
+
+    pub fn set_bot_opened(&mut self, position: BotPosition) {
+        self.bot_status = format!(
+            "BOT POSITION OPEN: {} @ ${:.8} -> TP ${:.8}",
+            position.symbol, position.entry_price, position.target_price
+        );
+        self.bot_active_position = Some(position);
+    }
+
+    pub fn set_bot_closed(&mut self, symbol: &str, current_price: f64, pnl_pct: f64, reason: &str) {
+        self.bot_active_position = None;
+        self.bot_status = format!(
+            "BOT POSITION CLOSED ({reason}): {symbol} @ ${current_price:.8} | PnL {pnl_pct:+.2}%"
+        );
+    }
+
+    pub fn set_bot_error(&mut self, action: &str, err: &str) {
+        self.bot_status = format!("BOT {action} ERROR: {err}");
+    }
+
     fn selected_pair_key(&self) -> Option<String> {
         self.filtered_pairs
             .get(self.selected_index)
@@ -491,6 +640,13 @@ fn parse_usd(s: &Option<String>) -> f64 {
     s.as_ref()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0)
+}
+
+fn pair_price_usd(pair: &PairData) -> Option<f64> {
+    pair.price_usd
+        .as_ref()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
 }
 
 const SCORE_BASELINE: i32 = 50;
