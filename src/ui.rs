@@ -25,8 +25,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     let body_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(6),    // table
-            Constraint::Length(9), // analysis
+            Constraint::Min(6),     // table
+            Constraint::Length(10), // analysis
         ])
         .split(main_layout[1]);
 
@@ -109,21 +109,22 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         .add_modifier(Modifier::BOLD);
 
     let widths = [
-        Constraint::Length(10), // symbol
+        Constraint::Length(9),  // symbol
         Constraint::Length(12), // price
         Constraint::Length(8),  // 1h %
         Constraint::Length(9),  // 24h %
-        Constraint::Length(14), // volume
-        Constraint::Length(14), // liquidity
-        Constraint::Length(14), // FDV
-        Constraint::Length(13), // signal
+        Constraint::Length(12), // volume
+        Constraint::Length(12), // liquidity
+        Constraint::Length(12), // mcap
+        Constraint::Length(12), // fdv
+        Constraint::Length(12), // signal
     ];
 
     let pair_count = app.filtered_pairs.len();
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({pair_count}) — ↑↓ scroll | ← → sort col | s search mode | +/- vol/liq filter | h help | q quit "
+            " Pairs ({pair_count}) — ↑↓ scroll | ← → sort col | s search mode | +/-/[ ]/{{ }} filters | h help | q quit "
         )))
         .row_highlight_style(highlight_style)
         .column_spacing(1);
@@ -149,6 +150,7 @@ fn build_header(app: &App) -> Row<'static> {
     let ch24h_marker = sort_marker(SortColumn::Change24h);
     let vol_marker = sort_marker(SortColumn::Volume24h);
     let liq_marker = sort_marker(SortColumn::Liquidity);
+    let mcap_marker = sort_marker(SortColumn::MarketCap);
     let fdv_marker = sort_marker(SortColumn::Fdv);
     let signal_marker = sort_marker(SortColumn::Signal);
 
@@ -159,6 +161,7 @@ fn build_header(app: &App) -> Row<'static> {
         Cell::from(format!("24h%{ch24h_marker}")),
         Cell::from(format!("Vol 24h{vol_marker}")),
         Cell::from(format!("Liquidity{liq_marker}")),
+        Cell::from(format!("MCap{mcap_marker}")),
         Cell::from(format!("FDV{fdv_marker}")),
         Cell::from(format!("Signal{signal_marker}")),
     ])
@@ -183,6 +186,7 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
                 .unwrap_or(0.0);
             let volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
             let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
+            let mcap = pair.market_cap.unwrap_or(0.0);
             let fdv = pair.fdv.unwrap_or(0.0);
             let (signal_label, signal_kind) = app
                 .assessment_for_pair_index(idx)
@@ -197,6 +201,7 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
                 Cell::from(change_cell(change_24h)),
                 Cell::from(format_usd(volume)),
                 Cell::from(format_usd(liquidity)),
+                Cell::from(format_usd(mcap)),
                 Cell::from(format_usd(fdv)),
                 Cell::from(signal_label).style(signal_style(signal_kind)),
             ])
@@ -293,8 +298,14 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .as_ref()
             .map(|a| a.notes.clone())
             .unwrap_or_else(|| vec!["Data analisa belum tersedia.".to_string()]);
+        let mcap = pair.market_cap.unwrap_or(0.0);
+        let fdv = pair.fdv.unwrap_or(0.0);
+        let fdv_mcap_ratio = app.selected_fdv_mcap_ratio();
         let shown_notes = notes.iter().take(3).collect::<Vec<_>>();
         let hidden_count = notes.len().saturating_sub(shown_notes.len());
+        let ratio_text = fdv_mcap_ratio
+            .map(|v| format!("{v:.2}x"))
+            .unwrap_or_else(|| "--".to_string());
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
@@ -305,6 +316,15 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("Rekomendasi: ", Style::default().fg(Color::Cyan)),
                 Span::styled(signal.label(), signal_style(signal)),
                 Span::raw(format!("  |  Score: {score}/100")),
+            ]),
+            Line::from(vec![
+                Span::styled("Valuasi: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "MCap {} | FDV {} | FDV/MCap {}",
+                    format_usd(mcap),
+                    format_usd(fdv),
+                    ratio_text
+                )),
             ]),
             Line::from(vec![
                 Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
@@ -360,6 +380,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("[", Style::default().fg(Color::DarkGray)),
         Span::styled("]", Style::default().fg(Color::DarkGray)),
         Span::raw(" liq filter  "),
+        Span::styled("{", Style::default().fg(Color::DarkGray)),
+        Span::styled("}", Style::default().fg(Color::DarkGray)),
+        Span::raw(" mcap filter  "),
         Span::styled("h", Style::default().fg(Color::Cyan)),
         Span::raw(" help  "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -375,6 +398,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::raw("  Liq ≥ "));
     spans.push(Span::styled(
         format_usd(app.min_liquidity_filter),
+        Style::default().fg(Color::Yellow),
+    ));
+    spans.push(Span::raw("  MCap ≥ "));
+    spans.push(Span::styled(
+        format_usd(app.min_market_cap_filter),
         Style::default().fg(Color::Yellow),
     ));
 
@@ -434,6 +462,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
         Line::from("  [ / ]         Decrease / increase min liquidity filter ($500 step)"),
+        Line::from("  { / }         Decrease / increase min market cap filter ($100K step)"),
         Line::from("  Enter         Open pair in Meteora"),
         Line::from("  m             (di Open mode) buka Meteora"),
         Line::from("  d             (di Open mode) buka DexScreener"),
@@ -448,6 +477,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  24h %         24-hour price change"),
         Line::from("  Vol 24h       24-hour volume in USD"),
         Line::from("  Liquidity     Total liquidity in USD"),
+        Line::from("  MCap          Market capitalization"),
         Line::from("  FDV           Fully diluted valuation"),
         Line::from("  Signal        Rekomendasi heuristik (Layak Masuk / Pantau / Hindari)"),
         Line::from(""),

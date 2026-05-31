@@ -184,6 +184,15 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         app.min_liquidity_filter += 500.0;
                         app.apply_filters();
                     }
+                    KeyCode::Char('{') => {
+                        app.min_market_cap_filter =
+                            (app.min_market_cap_filter - 100_000.0).max(0.0);
+                        app.apply_filters();
+                    }
+                    KeyCode::Char('}') => {
+                        app.min_market_cap_filter += 100_000.0;
+                        app.apply_filters();
+                    }
                     KeyCode::Enter => {
                         open_selected_pair_in_meteora(&mut app);
                     }
@@ -375,6 +384,7 @@ mod tests {
                 m5: Some(1.0),
             }),
             liquidity: Some(LiquidityData { usd: Some(1.0) }),
+            market_cap: Some(1_000_000.0),
             fdv: Some(1.0),
             pair_created_at: Some(0),
             pair_address: Some("pair".to_string()),

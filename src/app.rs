@@ -10,6 +10,7 @@ pub enum SortColumn {
     Change1h,
     Volume24h,
     Liquidity,
+    MarketCap,
     Fdv,
     Signal,
     Age,
@@ -23,7 +24,8 @@ impl SortColumn {
             SortColumn::Change24h => SortColumn::Change1h,
             SortColumn::Change1h => SortColumn::Volume24h,
             SortColumn::Volume24h => SortColumn::Liquidity,
-            SortColumn::Liquidity => SortColumn::Fdv,
+            SortColumn::Liquidity => SortColumn::MarketCap,
+            SortColumn::MarketCap => SortColumn::Fdv,
             SortColumn::Fdv => SortColumn::Signal,
             SortColumn::Signal => SortColumn::Age,
             SortColumn::Age => SortColumn::Symbol,
@@ -38,7 +40,8 @@ impl SortColumn {
             SortColumn::Change1h => SortColumn::Change24h,
             SortColumn::Volume24h => SortColumn::Change1h,
             SortColumn::Liquidity => SortColumn::Volume24h,
-            SortColumn::Fdv => SortColumn::Liquidity,
+            SortColumn::MarketCap => SortColumn::Liquidity,
+            SortColumn::Fdv => SortColumn::MarketCap,
             SortColumn::Signal => SortColumn::Fdv,
             SortColumn::Age => SortColumn::Signal,
         }
@@ -96,6 +99,7 @@ pub struct App {
     pub last_update: String,
     pub min_volume_filter: f64,
     pub min_liquidity_filter: f64,
+    pub min_market_cap_filter: f64,
     pub search_query: String,
     pub search_mode: bool,
     pub open_link_mode: bool,
@@ -117,6 +121,7 @@ impl App {
             last_update: String::from("--"),
             min_volume_filter: 1000.0,
             min_liquidity_filter: 500.0,
+            min_market_cap_filter: 0.0,
             search_query: String::new(),
             search_mode: false,
             open_link_mode: false,
@@ -160,8 +165,12 @@ impl App {
             .filter(|(_, pair)| {
                 let vol = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
                 let liq = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
+                let mcap = pair.market_cap.unwrap_or(0.0);
 
-                if vol < self.min_volume_filter || liq < self.min_liquidity_filter {
+                if vol < self.min_volume_filter
+                    || liq < self.min_liquidity_filter
+                    || mcap < self.min_market_cap_filter
+                {
                     return false;
                 }
 
@@ -189,8 +198,10 @@ impl App {
         let total = self.pairs.len();
         let vol = self.min_volume_filter;
         let liq = self.min_liquidity_filter;
-        self.status_message =
-            format!("Showing {filtered}/{total} pairs | Vol >= ${vol:.0} | Liq >= ${liq:.0}");
+        let mcap = self.min_market_cap_filter;
+        self.status_message = format!(
+            "Showing {filtered}/{total} pairs | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}"
+        );
     }
 
     fn sort_indices(&self, indices: &mut [usize]) {
@@ -245,6 +256,13 @@ impl App {
                         .partial_cmp(&liq_b)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 }
+                SortColumn::MarketCap => {
+                    let mcap_a = pa.market_cap.unwrap_or(0.0);
+                    let mcap_b = pb.market_cap.unwrap_or(0.0);
+                    mcap_a
+                        .partial_cmp(&mcap_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
                 SortColumn::Fdv => {
                     let fdv_a = pa.fdv.unwrap_or(0.0);
                     let fdv_b = pb.fdv.unwrap_or(0.0);
@@ -286,6 +304,16 @@ impl App {
 
     pub fn assessment_for_pair_index(&self, idx: usize) -> Option<&PairAssessment> {
         self.assessments.get(idx)
+    }
+
+    pub fn selected_fdv_mcap_ratio(&self) -> Option<f64> {
+        let pair = self.selected_pair()?;
+        let fdv = pair.fdv?;
+        let mcap = pair.market_cap?;
+        if mcap <= 0.0 {
+            return None;
+        }
+        Some(fdv / mcap)
     }
 
     pub fn move_selection_up(&mut self) {
@@ -665,6 +693,7 @@ mod tests {
             liquidity: Some(LiquidityData {
                 usd: Some(liquidity),
             }),
+            market_cap: Some(2_000_000.0),
             fdv: Some(1000.0),
             pair_created_at: Some(0),
             pair_address: Some(format!("pair-{symbol}")),
@@ -691,6 +720,34 @@ mod tests {
         assert_eq!(app.filtered_pairs.len(), 1);
         let selected = app.selected_pair().expect("pair should exist");
         assert_eq!(selected.base_token.symbol.as_deref(), Some("AAA"));
+    }
+
+    #[test]
+    fn apply_filters_respects_min_market_cap() {
+        let mut app = App::new();
+        let mut low = sample_pair("LOW", 50_000.0, 50_000.0);
+        low.market_cap = Some(200_000.0);
+        let mut high = sample_pair("HIGH", 50_000.0, 50_000.0);
+        high.market_cap = Some(2_000_000.0);
+        app.update_pairs(vec![low, high]);
+
+        app.min_market_cap_filter = 1_000_000.0;
+        app.apply_filters();
+
+        assert_eq!(app.filtered_pairs.len(), 1);
+        let selected = app.selected_pair().expect("pair should exist");
+        assert_eq!(selected.base_token.symbol.as_deref(), Some("HIGH"));
+    }
+
+    #[test]
+    fn selected_fdv_mcap_ratio_returns_expected_value() {
+        let mut app = App::new();
+        let mut pair = sample_pair("RATIO", 100_000.0, 100_000.0);
+        pair.market_cap = Some(2_000_000.0);
+        pair.fdv = Some(6_000_000.0);
+        app.update_pairs(vec![pair]);
+        let ratio = app.selected_fdv_mcap_ratio().expect("ratio should exist");
+        assert!((ratio - 3.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -766,6 +823,7 @@ mod tests {
             txns: None,
             volume: None,
             liquidity: None,
+            market_cap: None,
             fdv: None,
             pair_created_at: None,
             pair_address: Some("emp".to_string()),

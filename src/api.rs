@@ -28,6 +28,8 @@ pub struct PairData {
     pub txns: Option<TxnsData>,
     pub volume: Option<VolumeData>,
     pub liquidity: Option<LiquidityData>,
+    #[serde(rename = "marketCap")]
+    pub market_cap: Option<f64>,
     #[serde(rename = "fdv")]
     pub fdv: Option<f64>,
     #[serde(rename = "pairCreatedAt")]
