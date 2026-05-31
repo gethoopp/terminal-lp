@@ -26,6 +26,8 @@ const BOT_OPEN_ENDPOINT: &str = "positions/open";
 const BOT_CLOSE_ENDPOINT: &str = "positions/close";
 const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
 const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
+const BOT_ROUTER_CHAT_ENDPOINT: &str = "chat/completions";
+const BOT_ROUTER_MODEL: &str = "free-combo";
 
 enum BotTaskResult {
     Opened(BotPosition),
@@ -432,12 +434,15 @@ async fn execute_bot_open(
         "source": "haliim-terminal"
     });
 
+    let action_payload = body.clone();
     let response = post_bot_request_with_not_found_fallback(
         client,
         &bot_open_endpoint(),
         &BOT_OPEN_ENDPOINT_FALLBACKS,
         &body,
         &api_key,
+        "open",
+        &action_payload,
     )
     .await?;
     validate_bot_response(&response)?;
@@ -477,12 +482,15 @@ async fn execute_bot_close(
         "source": "haliim-terminal"
     });
 
+    let action_payload = body.clone();
     let response = post_bot_request_with_not_found_fallback(
         client,
         &bot_close_endpoint(),
         &BOT_CLOSE_ENDPOINT_FALLBACKS,
         &body,
         &api_key,
+        "close",
+        &action_payload,
     )
     .await?;
     validate_bot_response(&response)?;
@@ -531,6 +539,8 @@ async fn post_bot_request_with_not_found_fallback(
     fallback_endpoints: &[&str],
     body: &Value,
     api_key: &str,
+    action: &str,
+    action_payload: &Value,
 ) -> Result<Value, String> {
     let mut endpoint_candidates = vec![primary_endpoint.to_string()];
     for candidate in fallback_endpoints {
@@ -562,10 +572,15 @@ async fn post_bot_request_with_not_found_fallback(
             "Bot API 404 pada semua kombinasi base/endpoint. bases=[{bases}] endpoints=[{endpoints}]"
         ));
     }
-    Err(format!(
-        "{} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT. tried bases=[{bases}] endpoints=[{endpoints}]",
-        errors.join(" | ")
-    ))
+
+    let router_result = post_via_9router_chat(client, api_key, action, action_payload).await;
+    match router_result {
+        Ok(value) => Ok(value),
+        Err(router_err) => Err(format!(
+            "{} | 9router fallback gagal: {router_err} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL. tried bases=[{bases}] endpoints=[{endpoints}]",
+            errors.join(" | ")
+        )),
+    }
 }
 
 fn bot_api_key() -> String {
@@ -602,6 +617,84 @@ fn bot_open_endpoint() -> String {
 
 fn bot_close_endpoint() -> String {
     env::var("BOT_CLOSE_ENDPOINT").unwrap_or_else(|_| BOT_CLOSE_ENDPOINT.to_string())
+}
+
+fn bot_router_model() -> String {
+    env::var("BOT_ROUTER_MODEL").unwrap_or_else(|_| BOT_ROUTER_MODEL.to_string())
+}
+
+fn extract_first_choice_content(response: &Value) -> Option<String> {
+    response
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|first| first.get("message"))
+        .and_then(|msg| msg.get("content"))
+        .and_then(|content| content.as_str())
+        .map(|s| s.to_string())
+}
+
+fn extract_json_object_from_text(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(&text[start..=end])
+}
+
+async fn post_via_9router_chat(
+    client: &reqwest::Client,
+    api_key: &str,
+    action: &str,
+    action_payload: &Value,
+) -> Result<Value, String> {
+    let model = bot_router_model();
+    let prompt = format!(
+        "Execute trading action '{action}' with payload JSON below. \
+Return ONLY strict JSON object with keys: success(boolean), positionId(string optional), error(string optional), message(string optional).\n\
+Payload: {action_payload}"
+    );
+
+    let body = json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a trading execution bot. Always return strict JSON only."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    });
+
+    let response = post_bot_request(
+        client,
+        &bot_api_base_url(),
+        BOT_ROUTER_CHAT_ENDPOINT,
+        &body,
+        api_key,
+    )
+    .await
+    .map_err(|(_, err)| err)?;
+
+    let Some(content) = extract_first_choice_content(&response) else {
+        return Err(format!(
+            "9router chat response tidak punya message content: {response}"
+        ));
+    };
+
+    let Some(json_text) = extract_json_object_from_text(&content) else {
+        return Err(format!(
+            "9router chat response bukan JSON object valid: {content}"
+        ));
+    };
+
+    serde_json::from_str::<Value>(json_text)
+        .map_err(|err| format!("gagal parse JSON dari 9router content: {err}"))
 }
 
 fn validate_bot_response(response: &Value) -> Result<(), String> {
