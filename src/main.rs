@@ -21,9 +21,11 @@ type BotMessage = Result<BotTaskResult, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const BOT_API_BASE_URL: &str = "http://localhost:20128/v1";
-const BOT_API_KEY_PLACEHOLDER: &str = "REPLACE_WITH_LOCAL_BOT_API_KEY";
+const BOT_API_KEY_PLACEHOLDER: &str = "sk-2a14fb2176d78669-fr31su-94ad224b";
 const BOT_OPEN_ENDPOINT: &str = "positions/open";
 const BOT_CLOSE_ENDPOINT: &str = "positions/close";
+const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
+const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
 
 enum BotTaskResult {
     Opened(BotPosition),
@@ -430,7 +432,14 @@ async fn execute_bot_open(
         "source": "haliim-terminal"
     });
 
-    let response = post_bot_request(client, &bot_open_endpoint(), &body, &api_key).await?;
+    let response = post_bot_request_with_not_found_fallback(
+        client,
+        &bot_open_endpoint(),
+        &BOT_OPEN_ENDPOINT_FALLBACKS,
+        &body,
+        &api_key,
+    )
+    .await?;
     validate_bot_response(&response)?;
 
     let target_price = payload.entry_price * (1.0 + payload.take_profit_pct / 100.0);
@@ -468,7 +477,14 @@ async fn execute_bot_close(
         "source": "haliim-terminal"
     });
 
-    let response = post_bot_request(client, &bot_close_endpoint(), &body, &api_key).await?;
+    let response = post_bot_request_with_not_found_fallback(
+        client,
+        &bot_close_endpoint(),
+        &BOT_CLOSE_ENDPOINT_FALLBACKS,
+        &body,
+        &api_key,
+    )
+    .await?;
     validate_bot_response(&response)?;
 
     let pnl_pct = ((payload.current_price - payload.entry_price) / payload.entry_price) * 100.0;
@@ -485,30 +501,66 @@ async fn post_bot_request(
     endpoint: &str,
     body: &Value,
     api_key: &str,
-) -> Result<Value, String> {
-    let url = format!("{}/{}", BOT_API_BASE_URL.trim_end_matches('/'), endpoint);
+) -> Result<Value, (Option<reqwest::StatusCode>, String)> {
+    let url = format!("{}/{}", bot_api_base_url().trim_end_matches('/'), endpoint);
     let response = client
         .post(&url)
         .header("X-API-Key", api_key)
         .json(body)
         .send()
         .await
-        .map_err(|err| format!("{endpoint} request error: {err}"))?;
+        .map_err(|err| (None, format!("{endpoint} request error: {err}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("{endpoint} failed with {status}: {text}"));
+        return Err((
+            Some(status),
+            format!("{endpoint} failed with {status}: {text}"),
+        ));
     }
 
-    response
-        .json::<Value>()
-        .await
-        .map_err(|err| format!("{endpoint} invalid JSON response: {err}"))
+    let status = response.status();
+    response.json::<Value>().await.map_err(|err| {
+        (
+            Some(status),
+            format!("{endpoint} invalid JSON response: {err}"),
+        )
+    })
+}
+
+async fn post_bot_request_with_not_found_fallback(
+    client: &reqwest::Client,
+    primary_endpoint: &str,
+    fallback_endpoints: &[&str],
+    body: &Value,
+    api_key: &str,
+) -> Result<Value, String> {
+    match post_bot_request(client, primary_endpoint, body, api_key).await {
+        Ok(value) => Ok(value),
+        Err((Some(status), primary_error)) if status == reqwest::StatusCode::NOT_FOUND => {
+            let mut errors = vec![primary_error];
+            for candidate in fallback_endpoints {
+                if *candidate == primary_endpoint {
+                    continue;
+                }
+                match post_bot_request(client, candidate, body, api_key).await {
+                    Ok(value) => return Ok(value),
+                    Err((_status, err)) => errors.push(err),
+                }
+            }
+            Err(errors.join(" | "))
+        }
+        Err((_status, err)) => Err(err),
+    }
 }
 
 fn bot_api_key() -> String {
     env::var("BOT_API_KEY").unwrap_or_else(|_| BOT_API_KEY_PLACEHOLDER.to_string())
+}
+
+fn bot_api_base_url() -> String {
+    env::var("BOT_API_BASE_URL").unwrap_or_else(|_| BOT_API_BASE_URL.to_string())
 }
 
 fn bot_open_endpoint() -> String {
