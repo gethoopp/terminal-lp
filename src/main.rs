@@ -28,6 +28,8 @@ const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
 const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
 const BOT_ROUTER_CHAT_ENDPOINT: &str = "chat/completions";
 const BOT_ROUTER_MODEL: &str = "free-combo";
+const BOT_EXECUTION_MODE: &str = "auto";
+const BOT_AUTH_MODE: &str = "both";
 
 enum BotTaskResult {
     Opened(BotPosition),
@@ -37,6 +39,20 @@ enum BotTaskResult {
         pnl_pct: f64,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotMode {
+    Auto,
+    Router,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotAuthMode {
+    Bearer,
+    XApiKey,
+    Both,
 }
 
 #[tokio::main]
@@ -512,10 +528,22 @@ async fn post_bot_request(
     api_key: &str,
 ) -> Result<Value, (Option<reqwest::StatusCode>, String)> {
     let url = format!("{}/{}", base_url.trim_end_matches('/'), endpoint);
-    let response = client
-        .post(&url)
-        .header("X-API-Key", api_key)
-        .json(body)
+    let mut request = client.post(&url).json(body);
+
+    match bot_auth_mode() {
+        BotAuthMode::Bearer => {
+            request = request.header("Authorization", format!("Bearer {api_key}"));
+        }
+        BotAuthMode::XApiKey => {
+            request = request.header("X-API-Key", api_key);
+        }
+        BotAuthMode::Both => {
+            request = request.header("Authorization", format!("Bearer {api_key}"));
+            request = request.header("X-API-Key", api_key);
+        }
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|err| (None, format!("{url} request error: {err}")))?;
@@ -542,6 +570,17 @@ async fn post_bot_request_with_not_found_fallback(
     action: &str,
     action_payload: &Value,
 ) -> Result<Value, String> {
+    let prefer_router = should_prefer_router();
+    let mut router_first_error: Option<String> = None;
+    if prefer_router {
+        match post_via_9router_chat(client, api_key, action, action_payload).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                router_first_error = Some(err);
+            }
+        }
+    }
+
     let mut endpoint_candidates = vec![primary_endpoint.to_string()];
     for candidate in fallback_endpoints {
         if *candidate != primary_endpoint {
@@ -568,8 +607,20 @@ async fn post_bot_request_with_not_found_fallback(
     let bases = base_candidates.join(", ");
     let endpoints = endpoint_candidates.join(", ");
     if errors.is_empty() {
+        if let Some(router_err) = router_first_error {
+            return Err(format!(
+                "9router route gagal: {router_err} | Bot API 404 pada semua kombinasi base/endpoint. bases=[{bases}] endpoints=[{endpoints}]"
+            ));
+        }
         return Err(format!(
             "Bot API 404 pada semua kombinasi base/endpoint. bases=[{bases}] endpoints=[{endpoints}]"
+        ));
+    }
+
+    if let Some(router_err) = router_first_error {
+        return Err(format!(
+            "9router route gagal: {router_err} | {} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL/BOT_AUTH_MODE. tried bases=[{bases}] endpoints=[{endpoints}]",
+            errors.join(" | ")
         ));
     }
 
@@ -577,7 +628,7 @@ async fn post_bot_request_with_not_found_fallback(
     match router_result {
         Ok(value) => Ok(value),
         Err(router_err) => Err(format!(
-            "{} | 9router fallback gagal: {router_err} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL. tried bases=[{bases}] endpoints=[{endpoints}]",
+            "{} | 9router fallback gagal: {router_err} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL/BOT_AUTH_MODE. tried bases=[{bases}] endpoints=[{endpoints}]",
             errors.join(" | ")
         )),
     }
@@ -621,6 +672,35 @@ fn bot_close_endpoint() -> String {
 
 fn bot_router_model() -> String {
     env::var("BOT_ROUTER_MODEL").unwrap_or_else(|_| BOT_ROUTER_MODEL.to_string())
+}
+
+fn bot_execution_mode() -> BotMode {
+    let mode = env::var("BOT_EXECUTION_MODE").unwrap_or_else(|_| BOT_EXECUTION_MODE.to_string());
+    match mode.to_ascii_lowercase().as_str() {
+        "router" => BotMode::Router,
+        "direct" => BotMode::Direct,
+        _ => BotMode::Auto,
+    }
+}
+
+fn bot_auth_mode() -> BotAuthMode {
+    let mode = env::var("BOT_AUTH_MODE").unwrap_or_else(|_| BOT_AUTH_MODE.to_string());
+    match mode.to_ascii_lowercase().as_str() {
+        "bearer" => BotAuthMode::Bearer,
+        "x-api-key" | "xapikey" | "x_api_key" => BotAuthMode::XApiKey,
+        _ => BotAuthMode::Both,
+    }
+}
+
+fn should_prefer_router() -> bool {
+    match bot_execution_mode() {
+        BotMode::Router => true,
+        BotMode::Direct => false,
+        BotMode::Auto => {
+            let base = bot_api_base_url().to_ascii_lowercase();
+            base.contains("/v1")
+        }
+    }
 }
 
 fn extract_first_choice_content(response: &Value) -> Option<String> {
@@ -826,7 +906,10 @@ fn build_meteora_url(pair: &api::PairData) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bot_api_base_url_candidates, build_meteora_url, validate_bot_response};
+    use super::{
+        bot_api_base_url_candidates, bot_auth_mode, bot_execution_mode, build_meteora_url,
+        should_prefer_router, validate_bot_response, BotAuthMode, BotMode,
+    };
     use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
     use serde_json::json;
 
@@ -916,5 +999,31 @@ mod tests {
         } else {
             std::env::remove_var("BOT_API_BASE_URL");
         }
+    }
+
+    #[test]
+    fn bot_modes_are_parsed_from_env() {
+        std::env::set_var("BOT_EXECUTION_MODE", "router");
+        assert_eq!(bot_execution_mode(), BotMode::Router);
+        assert!(should_prefer_router());
+
+        std::env::set_var("BOT_EXECUTION_MODE", "direct");
+        assert_eq!(bot_execution_mode(), BotMode::Direct);
+        assert!(!should_prefer_router());
+
+        std::env::set_var("BOT_EXECUTION_MODE", "auto");
+        std::env::set_var("BOT_API_BASE_URL", "http://localhost:20128/v1");
+        assert_eq!(bot_execution_mode(), BotMode::Auto);
+        assert!(should_prefer_router());
+    }
+
+    #[test]
+    fn bot_auth_modes_are_parsed_from_env() {
+        std::env::set_var("BOT_AUTH_MODE", "bearer");
+        assert_eq!(bot_auth_mode(), BotAuthMode::Bearer);
+        std::env::set_var("BOT_AUTH_MODE", "x-api-key");
+        assert_eq!(bot_auth_mode(), BotAuthMode::XApiKey);
+        std::env::set_var("BOT_AUTH_MODE", "both");
+        assert_eq!(bot_auth_mode(), BotAuthMode::Both);
     }
 }
