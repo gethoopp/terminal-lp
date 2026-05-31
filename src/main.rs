@@ -27,7 +27,7 @@ const BOT_CLOSE_ENDPOINT: &str = "positions/close";
 const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
 const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
 const BOT_ROUTER_CHAT_ENDPOINT: &str = "chat/completions";
-const BOT_ROUTER_MODEL: &str = "free-combo";
+const BOT_ROUTER_MODEL: &str = "openrouter/auto";
 const BOT_EXECUTION_MODE: &str = "auto";
 const BOT_AUTH_MODE: &str = "both";
 
@@ -674,6 +674,31 @@ fn bot_router_model() -> String {
     env::var("BOT_ROUTER_MODEL").unwrap_or_else(|_| BOT_ROUTER_MODEL.to_string())
 }
 
+fn bot_router_models() -> Vec<String> {
+    let configured = env::var("BOT_ROUTER_MODELS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut models = Vec::new();
+    if !configured.is_empty() {
+        models.extend(configured);
+    } else {
+        models.push(bot_router_model());
+    }
+
+    models.push("openrouter/auto".to_string());
+    models.push("gpt-4o-mini".to_string());
+    models.retain(|m| !m.is_empty());
+    models.dedup();
+    models
+}
+
 fn bot_execution_mode() -> BotMode {
     let mode = env::var("BOT_EXECUTION_MODE").unwrap_or_else(|_| BOT_EXECUTION_MODE.to_string());
     match mode.to_ascii_lowercase().as_str() {
@@ -729,52 +754,80 @@ async fn post_via_9router_chat(
     action: &str,
     action_payload: &Value,
 ) -> Result<Value, String> {
-    let model = bot_router_model();
     let prompt = format!(
         "Execute trading action '{action}' with payload JSON below. \
 Return ONLY strict JSON object with keys: success(boolean), positionId(string optional), error(string optional), message(string optional).\n\
 Payload: {action_payload}"
     );
+    let base_candidates = bot_api_base_url_candidates();
+    let model_candidates = bot_router_models();
+    let mut errors = Vec::new();
 
-    let body = json!({
-        "model": model,
-        "stream": false,
-        "messages": [
+    for base in &base_candidates {
+        for model in &model_candidates {
+            let body = json!({
+                "model": model,
+                "stream": false,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a trading execution bot. Always return strict JSON only."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            });
+
+            let response = match post_bot_request(
+                client,
+                base,
+                BOT_ROUTER_CHAT_ENDPOINT,
+                &body,
+                api_key,
+            )
+            .await
             {
-                "role": "system",
-                "content": "You are a trading execution bot. Always return strict JSON only."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    });
+                Ok(v) => v,
+                Err((_status, err)) => {
+                    errors.push(err);
+                    continue;
+                }
+            };
 
-    let response = post_bot_request(
-        client,
-        &bot_api_base_url(),
-        BOT_ROUTER_CHAT_ENDPOINT,
-        &body,
-        api_key,
-    )
-    .await
-    .map_err(|(_, err)| err)?;
+            let Some(content) = extract_first_choice_content(&response) else {
+                errors.push(format!(
+                    "9router chat response tidak punya message content: {response}"
+                ));
+                continue;
+            };
 
-    let Some(content) = extract_first_choice_content(&response) else {
-        return Err(format!(
-            "9router chat response tidak punya message content: {response}"
-        ));
-    };
+            let Some(json_text) = extract_json_object_from_text(&content) else {
+                errors.push(format!(
+                    "9router chat response bukan JSON object valid: {content}"
+                ));
+                continue;
+            };
 
-    let Some(json_text) = extract_json_object_from_text(&content) else {
-        return Err(format!(
-            "9router chat response bukan JSON object valid: {content}"
-        ));
-    };
+            let parsed = match serde_json::from_str::<Value>(json_text) {
+                Ok(v) => v,
+                Err(err) => {
+                    errors.push(format!("gagal parse JSON dari 9router content: {err}"));
+                    continue;
+                }
+            };
 
-    serde_json::from_str::<Value>(json_text)
-        .map_err(|err| format!("gagal parse JSON dari 9router content: {err}"))
+            return Ok(parsed);
+        }
+    }
+
+    let bases = base_candidates.join(", ");
+    let models = model_candidates.join(", ");
+    Err(format!(
+        "{} | tried router bases=[{bases}] models=[{models}]",
+        errors.join(" | ")
+    ))
 }
 
 fn validate_bot_response(response: &Value) -> Result<(), String> {
@@ -907,8 +960,8 @@ fn build_meteora_url(pair: &api::PairData) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bot_api_base_url_candidates, bot_auth_mode, bot_execution_mode, build_meteora_url,
-        should_prefer_router, validate_bot_response, BotAuthMode, BotMode,
+        bot_api_base_url_candidates, bot_auth_mode, bot_execution_mode, bot_router_models,
+        build_meteora_url, should_prefer_router, validate_bot_response, BotAuthMode, BotMode,
     };
     use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
     use serde_json::json;
@@ -1025,5 +1078,14 @@ mod tests {
         assert_eq!(bot_auth_mode(), BotAuthMode::XApiKey);
         std::env::set_var("BOT_AUTH_MODE", "both");
         assert_eq!(bot_auth_mode(), BotAuthMode::Both);
+    }
+
+    #[test]
+    fn bot_router_models_support_csv_env() {
+        std::env::set_var("BOT_ROUTER_MODELS", "model-a, model-b");
+        let models = bot_router_models();
+        assert!(models.contains(&"model-a".to_string()));
+        assert!(models.contains(&"model-b".to_string()));
+        assert!(models.contains(&"openrouter/auto".to_string()));
     }
 }
