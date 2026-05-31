@@ -138,7 +138,7 @@ pub struct PairAssessment {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotPosition {
     pub pair_key: String,
     pub pair_address: Option<String>,
@@ -146,6 +146,8 @@ pub struct BotPosition {
     pub entry_price: f64,
     pub target_price: f64,
     pub take_profit_pct: f64,
+    pub stop_loss_price: f64,
+    pub stop_loss_pct: f64,
     pub opened_at: String,
     pub provider_position_id: Option<String>,
 }
@@ -159,6 +161,7 @@ pub struct BotOpenInput {
     pub quote_mint: Option<String>,
     pub entry_price: f64,
     pub take_profit_pct: f64,
+    pub stop_loss_pct: f64,
     pub position_size_usd: f64,
 }
 
@@ -176,6 +179,11 @@ pub struct BotCloseInput {
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct WatchlistStore {
     pairs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct BotPositionStore {
+    active_position: Option<BotPosition>,
 }
 
 pub struct App {
@@ -198,6 +206,7 @@ pub struct App {
     watchlist: HashSet<String>,
     pub bot_enabled: bool,
     pub bot_take_profit_pct: f64,
+    pub bot_stop_loss_pct: f64,
     pub bot_position_size_usd: f64,
     pub bot_active_position: Option<BotPosition>,
     pub bot_status: String,
@@ -209,6 +218,18 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let watchlist = load_watchlist();
+        let active_bot_position = load_bot_position();
+        let bot_status = if let Some(position) = active_bot_position.as_ref() {
+            format!(
+                "BOT POSITION RECOVERED: {} @ ${:.8} | TP ${:.8} | SL ${:.8}",
+                position.symbol,
+                position.entry_price,
+                position.target_price,
+                position.stop_loss_price
+            )
+        } else {
+            String::from("BOT OFF")
+        };
         App {
             pairs: Vec::new(),
             assessments: Vec::new(),
@@ -229,9 +250,10 @@ impl App {
             watchlist,
             bot_enabled: false,
             bot_take_profit_pct: 5.0,
+            bot_stop_loss_pct: 2.0,
             bot_position_size_usd: 25.0,
-            bot_active_position: None,
-            bot_status: String::from("BOT OFF"),
+            bot_active_position: active_bot_position,
+            bot_status,
             is_loading: true,
             show_help: false,
             error_message: None,
@@ -528,8 +550,8 @@ impl App {
         self.bot_enabled = !self.bot_enabled;
         if self.bot_enabled {
             self.bot_status = format!(
-                "BOT ON | TP {:.2}% | Size ${:.2}",
-                self.bot_take_profit_pct, self.bot_position_size_usd
+                "BOT ON | TP {:.2}% | SL {:.2}% | Size ${:.2}",
+                self.bot_take_profit_pct, self.bot_stop_loss_pct, self.bot_position_size_usd
             );
         } else {
             self.bot_status = String::from("BOT OFF");
@@ -560,6 +582,7 @@ impl App {
             quote_mint: pair.quote_token.address.clone(),
             entry_price,
             take_profit_pct: self.bot_take_profit_pct,
+            stop_loss_pct: self.bot_stop_loss_pct,
             position_size_usd: self.bot_position_size_usd,
         })
     }
@@ -594,31 +617,49 @@ impl App {
             .iter()
             .find(|pair| pair_watch_key(pair) == position.pair_key)?;
         let current_price = pair_price_usd(pair)?;
-        if current_price < position.target_price {
-            return None;
+        if current_price >= position.target_price {
+            return Some(BotCloseInput {
+                pair_key: position.pair_key.clone(),
+                pair_address: position.pair_address.clone(),
+                symbol: position.symbol.clone(),
+                entry_price: position.entry_price,
+                current_price,
+                provider_position_id: position.provider_position_id.clone(),
+                reason: String::from("auto_take_profit"),
+            });
+        }
+        if current_price <= position.stop_loss_price {
+            return Some(BotCloseInput {
+                pair_key: position.pair_key.clone(),
+                pair_address: position.pair_address.clone(),
+                symbol: position.symbol.clone(),
+                entry_price: position.entry_price,
+                current_price,
+                provider_position_id: position.provider_position_id.clone(),
+                reason: String::from("auto_stop_loss"),
+            });
         }
 
-        Some(BotCloseInput {
-            pair_key: position.pair_key.clone(),
-            pair_address: position.pair_address.clone(),
-            symbol: position.symbol.clone(),
-            entry_price: position.entry_price,
-            current_price,
-            provider_position_id: position.provider_position_id.clone(),
-            reason: String::from("auto_take_profit"),
-        })
+        None
     }
 
     pub fn set_bot_opened(&mut self, position: BotPosition) {
         self.bot_status = format!(
-            "BOT POSITION OPEN: {} @ ${:.8} -> TP ${:.8}",
-            position.symbol, position.entry_price, position.target_price
+            "BOT POSITION OPEN: {} @ ${:.8} | TP ${:.8} | SL ${:.8}",
+            position.symbol, position.entry_price, position.target_price, position.stop_loss_price
         );
         self.bot_active_position = Some(position);
+        if let Err(err) = save_bot_position(self.bot_active_position.as_ref()) {
+            self.bot_status = format!("BOT SAVE ERROR: {err}");
+        }
     }
 
     pub fn set_bot_closed(&mut self, symbol: &str, current_price: f64, pnl_pct: f64, reason: &str) {
         self.bot_active_position = None;
+        if let Err(err) = save_bot_position(None) {
+            self.bot_status = format!("BOT CLEAR ERROR: {err}");
+            return;
+        }
         self.bot_status = format!(
             "BOT POSITION CLOSED ({reason}): {symbol} @ ${current_price:.8} | PnL {pnl_pct:+.2}%"
         );
@@ -801,6 +842,13 @@ fn watchlist_path() -> Option<PathBuf> {
     Some(path)
 }
 
+fn bot_position_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    let mut path = PathBuf::from(home);
+    path.push(".haliim_terminal_bot_position.json");
+    Some(path)
+}
+
 fn load_watchlist() -> HashSet<String> {
     let Some(path) = watchlist_path() else {
         return HashSet::new();
@@ -826,6 +874,26 @@ fn save_watchlist(watchlist: &HashSet<String>) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&store)
         .map_err(|err| format!("serialize watchlist gagal: {err}"))?;
     fs::write(path, json).map_err(|err| format!("write watchlist gagal: {err}"))
+}
+
+fn load_bot_position() -> Option<BotPosition> {
+    let path = bot_position_path()?;
+    let raw = fs::read_to_string(path).ok()?;
+    let store = serde_json::from_str::<BotPositionStore>(&raw).ok()?;
+    store.active_position
+}
+
+fn save_bot_position(position: Option<&BotPosition>) -> Result<(), String> {
+    let Some(path) = bot_position_path() else {
+        return Err(String::from("HOME tidak tersedia"));
+    };
+
+    let store = BotPositionStore {
+        active_position: position.cloned(),
+    };
+    let json = serde_json::to_string_pretty(&store)
+        .map_err(|err| format!("serialize bot position gagal: {err}"))?;
+    fs::write(path, json).map_err(|err| format!("write bot position gagal: {err}"))
 }
 
 fn classify_health(score: i32) -> &'static str {

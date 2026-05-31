@@ -12,6 +12,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde_json::{json, Value};
+use std::env;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
 
@@ -20,7 +21,9 @@ type BotMessage = Result<BotTaskResult, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const BOT_API_BASE_URL: &str = "http://localhost:20128/v1";
-const BOT_API_KEY: &str = "REPLACE_WITH_LOCAL_BOT_API_KEY";
+const BOT_API_KEY_PLACEHOLDER: &str = "REPLACE_WITH_LOCAL_BOT_API_KEY";
+const BOT_OPEN_ENDPOINT: &str = "positions/open";
+const BOT_CLOSE_ENDPOINT: &str = "positions/close";
 
 enum BotTaskResult {
     Opened(BotPosition),
@@ -130,7 +133,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
 
     let tick_rate = Duration::from_millis(200);
     let refresh_rate = Duration::from_secs(15);
-    let bot_check_rate = Duration::from_secs(2);
+    let bot_check_rate = Duration::from_secs(15);
     let mut last_refresh = Instant::now();
     let mut last_bot_check = Instant::now();
 
@@ -413,6 +416,7 @@ async fn execute_bot_open(
     client: &reqwest::Client,
     payload: BotOpenInput,
 ) -> Result<BotTaskResult, String> {
+    let api_key = bot_api_key();
     let body = json!({
         "pairKey": payload.pair_key,
         "pairAddress": payload.pair_address,
@@ -422,17 +426,15 @@ async fn execute_bot_open(
         "entryPrice": payload.entry_price,
         "sizeUsd": payload.position_size_usd,
         "takeProfitPct": payload.take_profit_pct,
+        "stopLossPct": payload.stop_loss_pct,
         "source": "haliim-terminal"
     });
 
-    let response = post_bot_with_fallback(
-        client,
-        &["positions/open", "position/open", "trade/open"],
-        &body,
-    )
-    .await?;
+    let response = post_bot_request(client, &bot_open_endpoint(), &body, &api_key).await?;
+    validate_bot_response(&response)?;
 
     let target_price = payload.entry_price * (1.0 + payload.take_profit_pct / 100.0);
+    let stop_loss_price = payload.entry_price * (1.0 - payload.stop_loss_pct / 100.0);
     let position_id = extract_string(&response, &["positionId", "id"]);
     let position = BotPosition {
         pair_key: payload.pair_key,
@@ -441,6 +443,8 @@ async fn execute_bot_open(
         entry_price: payload.entry_price,
         target_price,
         take_profit_pct: payload.take_profit_pct,
+        stop_loss_price,
+        stop_loss_pct: payload.stop_loss_pct,
         opened_at: chrono::Local::now().format("%H:%M:%S").to_string(),
         provider_position_id: position_id,
     };
@@ -452,6 +456,7 @@ async fn execute_bot_close(
     client: &reqwest::Client,
     payload: BotCloseInput,
 ) -> Result<BotTaskResult, String> {
+    let api_key = bot_api_key();
     let body = json!({
         "pairKey": payload.pair_key,
         "pairAddress": payload.pair_address,
@@ -463,12 +468,8 @@ async fn execute_bot_close(
         "source": "haliim-terminal"
     });
 
-    post_bot_with_fallback(
-        client,
-        &["positions/close", "position/close", "trade/close"],
-        &body,
-    )
-    .await?;
+    let response = post_bot_request(client, &bot_close_endpoint(), &body, &api_key).await?;
+    validate_bot_response(&response)?;
 
     let pnl_pct = ((payload.current_price - payload.entry_price) / payload.entry_price) * 100.0;
     Ok(BotTaskResult::Closed {
@@ -479,43 +480,77 @@ async fn execute_bot_close(
     })
 }
 
-async fn post_bot_with_fallback(
+async fn post_bot_request(
     client: &reqwest::Client,
-    endpoints: &[&str],
+    endpoint: &str,
     body: &Value,
+    api_key: &str,
 ) -> Result<Value, String> {
-    let mut last_error = String::from("Unknown bot API error");
+    let url = format!("{}/{}", BOT_API_BASE_URL.trim_end_matches('/'), endpoint);
+    let response = client
+        .post(&url)
+        .header("X-API-Key", api_key)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| format!("{endpoint} request error: {err}"))?;
 
-    for endpoint in endpoints {
-        let url = format!("{}/{}", BOT_API_BASE_URL.trim_end_matches('/'), endpoint);
-        let response = client
-            .post(&url)
-            .header("X-API-Key", BOT_API_KEY)
-            .header("Authorization", format!("Bearer {BOT_API_KEY}"))
-            .json(body)
-            .send()
-            .await;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("{endpoint} failed with {status}: {text}"));
+    }
 
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                let parsed = resp
-                    .json::<Value>()
-                    .await
-                    .unwrap_or_else(|_| json!({ "ok": true }));
-                return Ok(parsed);
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                last_error = format!("{endpoint} failed with {status}: {text}");
-            }
-            Err(err) => {
-                last_error = format!("{endpoint} request error: {err}");
-            }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|err| format!("{endpoint} invalid JSON response: {err}"))
+}
+
+fn bot_api_key() -> String {
+    env::var("BOT_API_KEY").unwrap_or_else(|_| BOT_API_KEY_PLACEHOLDER.to_string())
+}
+
+fn bot_open_endpoint() -> String {
+    env::var("BOT_OPEN_ENDPOINT").unwrap_or_else(|_| BOT_OPEN_ENDPOINT.to_string())
+}
+
+fn bot_close_endpoint() -> String {
+    env::var("BOT_CLOSE_ENDPOINT").unwrap_or_else(|_| BOT_CLOSE_ENDPOINT.to_string())
+}
+
+fn validate_bot_response(response: &Value) -> Result<(), String> {
+    if let Some(err_msg) = response
+        .get("error")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            response
+                .get("data")
+                .and_then(|data| data.get("error"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+    {
+        return Err(format!("Bot API error: {err_msg}"));
+    }
+
+    if let Some(success) = response
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            response
+                .get("data")
+                .and_then(|data| data.get("success"))
+                .and_then(|value| value.as_bool())
+        })
+    {
+        if !success {
+            return Err(format!("Bot API returned success=false: {response}"));
         }
     }
 
-    Err(last_error)
+    Ok(())
 }
 
 fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -613,8 +648,9 @@ fn build_meteora_url(pair: &api::PairData) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_meteora_url;
+    use super::{build_meteora_url, validate_bot_response};
     use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
+    use serde_json::json;
 
     fn sample_pair(base_mint: Option<&str>, quote_mint: Option<&str>) -> PairData {
         PairData {
@@ -668,5 +704,23 @@ mod tests {
         let pair = sample_pair(None, None);
         let url = build_meteora_url(&pair);
         assert_eq!(url, "https://app.meteora.ag/");
+    }
+
+    #[test]
+    fn validate_bot_response_rejects_error_payload() {
+        let payload = json!({ "error": "insufficient_balance" });
+        assert!(validate_bot_response(&payload).is_err());
+    }
+
+    #[test]
+    fn validate_bot_response_rejects_success_false() {
+        let payload = json!({ "success": false, "message": "failed" });
+        assert!(validate_bot_response(&payload).is_err());
+    }
+
+    #[test]
+    fn validate_bot_response_accepts_success_true() {
+        let payload = json!({ "success": true, "positionId": "abc123" });
+        assert!(validate_bot_response(&payload).is_ok());
     }
 }

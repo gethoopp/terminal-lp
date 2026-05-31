@@ -380,11 +380,13 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![
                 Span::styled("Posisi Aktif: ", Style::default().fg(Color::Cyan)),
                 Span::raw(format!(
-                    "{} | entry ${:.8} | target ${:.8} ({:.2}%) | buka {}",
+                    "{} | entry ${:.8} | TP ${:.8} ({:.2}%) | SL ${:.8} ({:.2}%) | buka {}",
                     position.symbol,
                     position.entry_price,
                     position.target_price,
                     position.take_profit_pct,
+                    position.stop_loss_price,
+                    position.stop_loss_pct,
                     position.opened_at
                 )),
             ]));
@@ -556,7 +558,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  W             Toggle watchlist-only mode"),
         Line::from("  b             Toggle bot mode ON/OFF"),
         Line::from("  p             Place position via local Meteora bot API"),
-        Line::from("  t             Manual take-profit close for active bot position"),
+        Line::from("  t             Manual close for active bot position"),
         Line::from("  o             Open mode: pilih tujuan link pair"),
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
@@ -565,9 +567,8 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Enter         Open pair in Meteora"),
         Line::from("  m             (di Open mode) buka Meteora"),
         Line::from("  d             (di Open mode) buka DexScreener"),
-        Line::from(
-            "  Bot API       Base URL http://localhost:20128/v1 (API key hardcoded placeholder)",
-        ),
+        Line::from("  Bot API       Base URL http://localhost:20128/v1"),
+        Line::from("  Env vars      BOT_API_KEY, BOT_OPEN_ENDPOINT, BOT_CLOSE_ENDPOINT"),
         Line::from("  Ctrl+C        Quit"),
         Line::from("  h             Toggle this help screen"),
         Line::from("  q / Esc       Quit"),
