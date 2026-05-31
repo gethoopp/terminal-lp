@@ -27,7 +27,7 @@ const BOT_CLOSE_ENDPOINT: &str = "positions/close";
 const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
 const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
 const BOT_ROUTER_CHAT_ENDPOINT: &str = "chat/completions";
-const BOT_ROUTER_MODEL: &str = "openrouter/auto";
+const BOT_ROUTER_MODEL: &str = "kr/claude-opus-4.6";
 const BOT_EXECUTION_MODE: &str = "auto";
 const BOT_AUTH_MODE: &str = "both";
 
