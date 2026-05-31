@@ -74,30 +74,30 @@ pub fn build_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
 /// Fetch top volatile pairs from DexScreener for a given search query (e.g. token address or name)
 async fn search_pairs(client: &reqwest::Client, query: &str) -> Result<Vec<PairData>, String> {
-    let url = format!("{}/search?q={}", DEXSCREENER_API, query);
+    let url = format!("{DEXSCREENER_API}/search?q={query}");
 
     let resp = client
         .get(&url)
         .header("User-Agent", "volatile-scanner/0.1")
         .send()
         .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+        .map_err(|e| format!("Request failed: {e}"))?;
 
     if !resp.status().is_success() {
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err("API rate limit hit (429)".to_string());
         }
-        return Err(format!("API returned status: {}", resp.status()));
+        let status = resp.status();
+        return Err(format!("API returned status: {status}"));
     }
 
-    let body = resp.text().await.map_err(|e| format!("Read body: {}", e))?;
-    let data: DexResponse =
-        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
+    let body = resp.text().await.map_err(|e| format!("Read body: {e}"))?;
+    let data: DexResponse = serde_json::from_str(&body).map_err(|e| format!("Parse error: {e}"))?;
 
     Ok(data.pairs.unwrap_or_default())
 }
@@ -174,7 +174,7 @@ pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResul
                 }
             }
             Err(e) => {
-                warnings.push(format!("search '{}' failed: {}", query, e));
+                warnings.push(format!("search '{query}' failed: {e}"));
             }
         }
 

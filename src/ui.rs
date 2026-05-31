@@ -1,4 +1,4 @@
-use crate::app::{assess_pair, App, PairAssessment, SortColumn, SortDirection, TradeSignal};
+use crate::app::{App, SortColumn, SortDirection, TradeSignal};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),    // table
-            Constraint::Length(8), // analysis
+            Constraint::Length(9), // analysis
         ])
         .split(main_layout[1]);
 
@@ -37,9 +37,10 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    let last_update = &app.last_update;
+    let status_message = &app.status_message;
     let title = format!(
-        " Volatile Scanner — Solana DEX Pairs  |  Last update: {}  |  {} ",
-        app.last_update, app.status_message
+        " Volatile Scanner — Solana DEX Pairs  |  Last update: {last_update}  |  {status_message} "
     );
 
     let header_style = if app.is_loading {
@@ -73,7 +74,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     if let Some(ref err) = app.error_message {
-        let error = Paragraph::new(format!("Error: {}", err))
+        let error = Paragraph::new(format!("Error: {err}"))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -118,11 +119,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(13), // signal
     ];
 
+    let pair_count = app.filtered_pairs.len();
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({}) — ↑↓ scroll | ← → sort col | s search mode | +/- vol/liq filter | h help | q quit ",
-            app.filtered_pairs.len()
+            " Pairs ({pair_count}) — ↑↓ scroll | ← → sort col | s search mode | +/- vol/liq filter | h help | q quit "
         )))
         .row_highlight_style(highlight_style)
         .column_spacing(1);
@@ -142,15 +143,24 @@ fn build_header(app: &App) -> Row<'static> {
         }
     };
 
+    let symbol_marker = sort_marker(SortColumn::Symbol);
+    let price_marker = sort_marker(SortColumn::Price);
+    let ch1h_marker = sort_marker(SortColumn::Change1h);
+    let ch24h_marker = sort_marker(SortColumn::Change24h);
+    let vol_marker = sort_marker(SortColumn::Volume24h);
+    let liq_marker = sort_marker(SortColumn::Liquidity);
+    let fdv_marker = sort_marker(SortColumn::Fdv);
+    let signal_marker = sort_marker(SortColumn::Signal);
+
     Row::new(vec![
-        Cell::from(format!("Symbol{}", sort_marker(SortColumn::Symbol))),
-        Cell::from(format!("Price{}", sort_marker(SortColumn::Price))),
-        Cell::from(format!("1h%{}", sort_marker(SortColumn::Change1h))),
-        Cell::from(format!("24h%{}", sort_marker(SortColumn::Change24h))),
-        Cell::from(format!("Vol 24h{}", sort_marker(SortColumn::Volume24h))),
-        Cell::from(format!("Liquidity{}", sort_marker(SortColumn::Liquidity))),
-        Cell::from(format!("FDV{}", sort_marker(SortColumn::FDV))),
-        Cell::from("Signal"),
+        Cell::from(format!("Symbol{symbol_marker}")),
+        Cell::from(format!("Price{price_marker}")),
+        Cell::from(format!("1h%{ch1h_marker}")),
+        Cell::from(format!("24h%{ch24h_marker}")),
+        Cell::from(format!("Vol 24h{vol_marker}")),
+        Cell::from(format!("Liquidity{liq_marker}")),
+        Cell::from(format!("FDV{fdv_marker}")),
+        Cell::from(format!("Signal{signal_marker}")),
     ])
 }
 
@@ -174,8 +184,10 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
             let volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
             let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
             let fdv = pair.fdv.unwrap_or(0.0);
-            let assessment = assess_pair(pair);
-            let signal_style = signal_style(assessment.signal);
+            let (signal_label, signal_kind) = app
+                .assessment_for_pair_index(idx)
+                .map(|a| (a.signal.label(), a.signal))
+                .unwrap_or(("PANTAU", TradeSignal::Watchlist));
 
             Row::new(vec![
                 Cell::from(symbol.to_uppercase())
@@ -186,7 +198,7 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
                 Cell::from(format_usd(volume)),
                 Cell::from(format_usd(liquidity)),
                 Cell::from(format_usd(fdv)),
-                Cell::from(assessment.signal.label()).style(signal_style),
+                Cell::from(signal_label).style(signal_style(signal_kind)),
             ])
         })
         .collect()
@@ -221,7 +233,7 @@ fn change_cell(value: f64) -> Text<'static> {
         " "
     };
 
-    Text::from(Span::styled(format!("{} {:>6.2}%", arrow, value), style))
+    Text::from(Span::styled(format!("{arrow} {value:>6.2}%"), style))
 }
 
 fn format_price(price: &Option<String>) -> String {
@@ -229,11 +241,11 @@ fn format_price(price: &Option<String>) -> String {
         Some(p) => {
             if let Ok(val) = p.parse::<f64>() {
                 if val >= 1.0 {
-                    format!("${:.4}", val)
+                    format!("${val:.4}")
                 } else if val >= 0.0001 {
-                    format!("${:.8}", val)
+                    format!("${val:.8}")
                 } else {
-                    format!("${:.12}", val)
+                    format!("${val:.12}")
                 }
             } else {
                 p.chars().take(12).collect()
@@ -251,7 +263,7 @@ fn format_usd(value: f64) -> String {
     } else if value >= 1_000.0 {
         format!("${:.2}K", value / 1_000.0)
     } else if value > 0.0 {
-        format!("${:.2}", value)
+        format!("${value:.2}")
     } else {
         String::from("--")
     }
@@ -259,11 +271,7 @@ fn format_usd(value: f64) -> String {
 
 fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
     let content = if let Some(pair) = app.selected_pair() {
-        let assessment = app.selected_assessment().unwrap_or_else(|| PairAssessment {
-            signal: TradeSignal::Watchlist,
-            score: 50,
-            notes: vec!["Data analisa belum tersedia.".to_string()],
-        });
+        let assessment = app.selected_assessment();
 
         let symbol = pair
             .base_token
@@ -272,22 +280,40 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .unwrap_or("???")
             .to_uppercase();
         let name = pair.base_token.name.as_deref().unwrap_or("-");
+        let signal = assessment
+            .as_ref()
+            .map(|a| a.signal)
+            .unwrap_or(TradeSignal::Watchlist);
+        let score = assessment.as_ref().map(|a| a.score).unwrap_or(50);
+        let notes = assessment
+            .as_ref()
+            .map(|a| a.notes.clone())
+            .unwrap_or_else(|| vec!["Data analisa belum tersedia.".to_string()]);
+        let shown_notes = notes.iter().take(3).collect::<Vec<_>>();
+        let hidden_count = notes.len().saturating_sub(shown_notes.len());
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
                 Span::styled(symbol, Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(" ({})", name)),
+                Span::raw(format!(" ({name})")),
             ]),
             Line::from(vec![
                 Span::styled("Rekomendasi: ", Style::default().fg(Color::Cyan)),
-                Span::styled(assessment.signal.label(), signal_style(assessment.signal)),
-                Span::raw(format!("  |  Score: {}/100", assessment.score)),
+                Span::styled(signal.label(), signal_style(signal)),
+                Span::raw(format!("  |  Score: {score}/100")),
             ]),
         ];
 
-        for note in assessment.notes.iter().take(3) {
-            lines.push(Line::from(format!("- {}", note)));
+        for note in shown_notes {
+            lines.push(Line::from(format!("- {note}")));
         }
+        if hidden_count > 0 {
+            lines.push(Line::from(format!("... +{hidden_count} catatan lainnya")));
+        }
+        lines.push(Line::from(Span::styled(
+            "Heuristik teknikal, bukan financial advice.",
+            Style::default().fg(Color::DarkGray),
+        )));
 
         Paragraph::new(lines)
             .block(

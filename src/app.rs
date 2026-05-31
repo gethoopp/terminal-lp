@@ -9,7 +9,8 @@ pub enum SortColumn {
     Change1h,
     Volume24h,
     Liquidity,
-    FDV,
+    Fdv,
+    Signal,
     Age,
 }
 
@@ -21,8 +22,9 @@ impl SortColumn {
             SortColumn::Change24h => SortColumn::Change1h,
             SortColumn::Change1h => SortColumn::Volume24h,
             SortColumn::Volume24h => SortColumn::Liquidity,
-            SortColumn::Liquidity => SortColumn::FDV,
-            SortColumn::FDV => SortColumn::Age,
+            SortColumn::Liquidity => SortColumn::Fdv,
+            SortColumn::Fdv => SortColumn::Signal,
+            SortColumn::Signal => SortColumn::Age,
             SortColumn::Age => SortColumn::Symbol,
         }
     }
@@ -35,8 +37,9 @@ impl SortColumn {
             SortColumn::Change1h => SortColumn::Change24h,
             SortColumn::Volume24h => SortColumn::Change1h,
             SortColumn::Liquidity => SortColumn::Volume24h,
-            SortColumn::FDV => SortColumn::Liquidity,
-            SortColumn::Age => SortColumn::FDV,
+            SortColumn::Fdv => SortColumn::Liquidity,
+            SortColumn::Signal => SortColumn::Fdv,
+            SortColumn::Age => SortColumn::Signal,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct PairAssessment {
 
 pub struct App {
     pub pairs: Vec<PairData>,
+    pub assessments: Vec<PairAssessment>,
     pub filtered_pairs: Vec<usize>,
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
@@ -101,6 +105,7 @@ impl App {
     pub fn new() -> Self {
         App {
             pairs: Vec::new(),
+            assessments: Vec::new(),
             filtered_pairs: Vec::new(),
             sort_column: SortColumn::Change24h,
             sort_direction: SortDirection::Descending,
@@ -119,9 +124,11 @@ impl App {
 
     pub fn update_pairs(&mut self, pairs: Vec<PairData>) {
         self.pairs = pairs;
+        self.assessments = self.pairs.iter().map(assess_pair).collect();
         self.apply_filters();
         self.last_update = Local::now().format("%H:%M:%S").to_string();
-        self.status_message = format!("Loaded {} pairs", self.pairs.len());
+        let count = self.pairs.len();
+        self.status_message = format!("Loaded {count} pairs");
         self.is_loading = false;
         self.error_message = None;
 
@@ -174,13 +181,12 @@ impl App {
 
         self.sort_indices(&mut indices);
         self.filtered_pairs = indices;
-        self.status_message = format!(
-            "Showing {} / {} pairs | Vol >= ${:.0} | Liq >= ${:.0}",
-            self.filtered_pairs.len(),
-            self.pairs.len(),
-            self.min_volume_filter,
-            self.min_liquidity_filter
-        );
+        let filtered = self.filtered_pairs.len();
+        let total = self.pairs.len();
+        let vol = self.min_volume_filter;
+        let liq = self.min_liquidity_filter;
+        self.status_message =
+            format!("Showing {filtered}/{total} pairs | Vol >= ${vol:.0} | Liq >= ${liq:.0}");
     }
 
     fn sort_indices(&self, indices: &mut [usize]) {
@@ -235,12 +241,17 @@ impl App {
                         .partial_cmp(&liq_b)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 }
-                SortColumn::FDV => {
+                SortColumn::Fdv => {
                     let fdv_a = pa.fdv.unwrap_or(0.0);
                     let fdv_b = pb.fdv.unwrap_or(0.0);
                     fdv_a
                         .partial_cmp(&fdv_b)
                         .unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortColumn::Signal => {
+                    let signal_a = self.assessments.get(a).map(|x| x.score).unwrap_or_default();
+                    let signal_b = self.assessments.get(b).map(|x| x.score).unwrap_or_default();
+                    signal_a.cmp(&signal_b)
                 }
                 SortColumn::Age => {
                     let age_a = pa.pair_created_at.unwrap_or(0);
@@ -263,7 +274,14 @@ impl App {
     }
 
     pub fn selected_assessment(&self) -> Option<PairAssessment> {
-        self.selected_pair().map(assess_pair)
+        self.filtered_pairs
+            .get(self.selected_index)
+            .and_then(|&idx| self.assessments.get(idx))
+            .cloned()
+    }
+
+    pub fn assessment_for_pair_index(&self, idx: usize) -> Option<&PairAssessment> {
+        self.assessments.get(idx)
     }
 
     pub fn move_selection_up(&mut self) {
@@ -310,6 +328,33 @@ fn parse_usd(s: &Option<String>) -> f64 {
         .unwrap_or(0.0)
 }
 
+const SCORE_BASELINE: i32 = 50;
+const SCORE_GOOD_ENTRY_MIN: i32 = 67;
+const SCORE_WATCHLIST_MIN: i32 = 45;
+
+const LIQUIDITY_STRONG_USD: f64 = 150_000.0;
+const LIQUIDITY_THIN_USD: f64 = 20_000.0;
+const VOLUME_ACTIVE_USD: f64 = 500_000.0;
+const VOLUME_WEAK_USD: f64 = 50_000.0;
+
+const MOMENTUM_HEALTHY_24H_MIN: f64 = 5.0;
+const MOMENTUM_HEALTHY_24H_MAX: f64 = 35.0;
+const MOMENTUM_HEALTHY_1H_MIN: f64 = 0.5;
+const MOMENTUM_HEALTHY_1H_MAX: f64 = 8.0;
+
+const MOMENTUM_EXTENSION_24H_MIN: f64 = 35.0;
+const MOMENTUM_EXTENSION_24H_MAX: f64 = 60.0;
+const MOMENTUM_BLOWOFF_24H_MIN: f64 = 60.0;
+const MOMENTUM_BEARISH_24H_MIN: f64 = -12.0;
+const MOMENTUM_FLAT_24H_MAX_ABS: f64 = 3.0;
+const MOMENTUM_FLAT_1H_MAX_ABS: f64 = 1.0;
+const MOMENTUM_5M_REBOUND_MIN: f64 = 2.0;
+const MOMENTUM_5M_DUMP_MAX: f64 = -4.0;
+
+const VOL_LIQ_RATIO_HEALTHY_MIN: f64 = 0.7;
+const VOL_LIQ_RATIO_HEALTHY_MAX: f64 = 8.0;
+const VOL_LIQ_RATIO_OVERHEATED_MIN: f64 = 15.0;
+
 pub fn assess_pair(pair: &PairData) -> PairAssessment {
     let change_24h = pair
         .price_change
@@ -334,52 +379,73 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         0.0
     };
 
-    let mut score = 50;
+    let mut score = SCORE_BASELINE;
     let mut notes = Vec::new();
 
-    if liquidity >= 150_000.0 {
+    if liquidity >= LIQUIDITY_STRONG_USD {
         score += 12;
         notes.push("Likuiditas kuat, risiko slippage lebih rendah.".to_string());
-    } else if liquidity < 20_000.0 {
+    } else if liquidity < LIQUIDITY_THIN_USD {
         score -= 20;
         notes.push("Likuiditas tipis, slippage dan wick bisa tinggi.".to_string());
     }
 
-    if vol_24h >= 500_000.0 {
+    if vol_24h >= VOLUME_ACTIVE_USD {
         score += 10;
         notes.push("Volume 24h tinggi, market aktif.".to_string());
-    } else if vol_24h < 50_000.0 {
+    } else if vol_24h < VOLUME_WEAK_USD {
         score -= 12;
         notes.push("Volume rendah, setup kurang valid.".to_string());
     }
 
-    if (5.0..=35.0).contains(&change_24h) && (0.5..=8.0).contains(&change_1h) && change_5m > -2.0 {
+    if (MOMENTUM_HEALTHY_24H_MIN..=MOMENTUM_HEALTHY_24H_MAX).contains(&change_24h)
+        && (MOMENTUM_HEALTHY_1H_MIN..=MOMENTUM_HEALTHY_1H_MAX).contains(&change_1h)
+        && change_5m > -2.0
+    {
         score += 18;
         notes.push("Momentum naik sehat (24h + 1h selaras).".to_string());
-    } else if change_24h > 60.0 && change_1h < 0.0 {
+    } else if (MOMENTUM_EXTENSION_24H_MIN..=MOMENTUM_EXTENSION_24H_MAX).contains(&change_24h)
+        && change_1h > 0.0
+    {
+        score += 10;
+        notes.push("Momentum naik lanjutan, tapi mulai extended.".to_string());
+    } else if change_24h > MOMENTUM_BLOWOFF_24H_MIN && change_1h < 0.0 {
         score -= 18;
         notes.push("Potensi blow-off: naik tajam tapi 1h mulai melemah.".to_string());
-    } else if change_24h < -12.0 && change_1h < 0.0 {
+    } else if change_24h < MOMENTUM_BEARISH_24H_MIN && change_1h < 0.0 {
         score -= 20;
         notes.push("Trend turun berlanjut, sebaiknya hindari entry dulu.".to_string());
-    } else if change_24h.abs() < 3.0 && change_1h.abs() < 1.0 {
+    } else if change_24h.abs() < MOMENTUM_FLAT_24H_MAX_ABS
+        && change_1h.abs() < MOMENTUM_FLAT_1H_MAX_ABS
+    {
         score -= 6;
         notes.push("Pergerakan datar, belum ada konfirmasi arah.".to_string());
+    } else if change_1h >= 8.0 && change_24h.abs() < 5.0 {
+        if change_5m >= MOMENTUM_5M_REBOUND_MIN {
+            score += 6;
+            notes.push("Spike 1h didukung akselerasi 5m (potensi breakout).".to_string());
+        } else {
+            score -= 6;
+            notes.push("Spike 1h belum didukung struktur 24h, rawan fakeout.".to_string());
+        }
+    } else if change_5m <= MOMENTUM_5M_DUMP_MAX && change_1h > 0.0 {
+        score -= 8;
+        notes.push("Tekanan jual 5m muncul saat 1h hijau, perlu konfirmasi ulang.".to_string());
     }
 
-    if vol_liq_ratio >= 0.7 && vol_liq_ratio <= 8.0 {
+    if (VOL_LIQ_RATIO_HEALTHY_MIN..=VOL_LIQ_RATIO_HEALTHY_MAX).contains(&vol_liq_ratio) {
         score += 8;
         notes.push("Rasio volume/likuiditas sehat untuk eksekusi.".to_string());
-    } else if vol_liq_ratio > 15.0 {
+    } else if vol_liq_ratio > VOL_LIQ_RATIO_OVERHEATED_MIN {
         score -= 10;
         notes.push("Volume terlalu agresif vs likuiditas, rawan volatilitas ekstrem.".to_string());
     }
 
     score = score.clamp(0, 100);
 
-    let signal = if score >= 67 {
+    let signal = if score >= SCORE_GOOD_ENTRY_MIN {
         TradeSignal::GoodEntry
-    } else if score >= 45 {
+    } else if score >= SCORE_WATCHLIST_MIN {
         TradeSignal::Watchlist
     } else {
         TradeSignal::Avoid
@@ -431,7 +497,7 @@ mod tests {
             }),
             fdv: Some(1000.0),
             pair_created_at: Some(0),
-            pair_address: Some(format!("pair-{}", symbol)),
+            pair_address: Some(format!("pair-{symbol}")),
             url: Some("https://dexscreener.com".to_string()),
         }
     }
@@ -459,7 +525,12 @@ mod tests {
 
     #[test]
     fn assess_pair_returns_good_entry_on_healthy_momentum() {
-        let pair = sample_pair("MOMO", 900_000.0, 300_000.0);
+        let mut pair = sample_pair("MOMO", 900_000.0, 300_000.0);
+        if let Some(change) = pair.price_change.as_mut() {
+            change.h24 = Some(12.0);
+            change.h1 = Some(3.0);
+            change.m5 = Some(1.5);
+        }
         let assessed = assess_pair(&pair);
         assert_eq!(assessed.signal, TradeSignal::GoodEntry);
         assert!(assessed.score >= 67);
@@ -475,5 +546,61 @@ mod tests {
         let assessed = assess_pair(&pair);
         assert_eq!(assessed.signal, TradeSignal::Avoid);
         assert!(assessed.score < 45);
+    }
+
+    #[test]
+    fn assess_pair_detects_blow_off_risk() {
+        let mut pair = sample_pair("BLOW", 700_000.0, 120_000.0);
+        if let Some(change) = pair.price_change.as_mut() {
+            change.h24 = Some(72.0);
+            change.h1 = Some(-2.0);
+            change.m5 = Some(-3.0);
+        }
+        let assessed = assess_pair(&pair);
+        assert!(assessed.notes.iter().any(|x| x.contains("blow-off")));
+        assert!(assessed.score < 67);
+    }
+
+    #[test]
+    fn assess_pair_detects_early_breakout() {
+        let mut pair = sample_pair("BRK", 250_000.0, 90_000.0);
+        if let Some(change) = pair.price_change.as_mut() {
+            change.h24 = Some(2.0);
+            change.h1 = Some(9.0);
+            change.m5 = Some(2.5);
+        }
+        let assessed = assess_pair(&pair);
+        assert!(assessed
+            .notes
+            .iter()
+            .any(|x| x.contains("potensi breakout")));
+    }
+
+    #[test]
+    fn assess_pair_handles_missing_values() {
+        let pair = PairData {
+            chain_id: "solana".to_string(),
+            dex_id: "raydium".to_string(),
+            base_token: TokenInfo {
+                name: Some("EMPTY".to_string()),
+                symbol: Some("EMP".to_string()),
+            },
+            quote_token: TokenInfo {
+                name: Some("USDC".to_string()),
+                symbol: Some("USDC".to_string()),
+            },
+            price_usd: None,
+            price_change: None,
+            volume: None,
+            liquidity: None,
+            fdv: None,
+            pair_created_at: None,
+            pair_address: Some("emp".to_string()),
+            url: None,
+        };
+
+        let assessed = assess_pair(&pair);
+        assert!((0..=100).contains(&assessed.score));
+        assert!(!assessed.notes.is_empty());
     }
 }

@@ -101,7 +101,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         if let Some(pair) = app.selected_pair() {
                             if let Some(ref url) = pair.url {
                                 if let Err(err) = open::that(url) {
-                                    app.set_warning(format!("Failed to open URL: {}", err));
+                                    app.set_warning(format!("Failed to open URL: {err}"));
                                 }
                             }
                         }
@@ -161,10 +161,8 @@ fn drain_fetch_results(
                     Ok(data) => {
                         app.update_pairs(data.pairs);
                         if !data.warnings.is_empty() {
-                            app.set_warning(format!(
-                                "Loaded with warnings: {}",
-                                data.warnings.join(" | ")
-                            ));
+                            let warnings = data.warnings.join(" | ");
+                            app.set_warning(format!("Loaded with warnings: {warnings}"));
                         }
                     }
                     Err(e) => {
