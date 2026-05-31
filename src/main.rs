@@ -4,7 +4,13 @@ mod ui;
 
 use app::App;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::DefaultTerminal;
+use ratatui::{
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::Line,
+    widgets::{Block, Borders, Paragraph},
+    DefaultTerminal, Frame,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
 
@@ -16,11 +22,85 @@ const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
     terminal.clear()?;
+    show_intro_screen(&mut terminal)?;
 
     let result = run_app(&mut terminal).await;
 
     ratatui::restore();
     result
+}
+
+fn show_intro_screen(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
+    let duration = Duration::from_millis(2300);
+    let started_at = Instant::now();
+
+    loop {
+        terminal.draw(|frame| render_intro(frame, started_at.elapsed()))?;
+
+        if started_at.elapsed() >= duration {
+            break;
+        }
+
+        if event::poll(Duration::from_millis(90))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
+    }
+
+    terminal.clear()?;
+    Ok(())
+}
+
+fn render_intro(frame: &mut Frame, elapsed: Duration) {
+    let area = frame.area();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Length(8),
+            Constraint::Percentage(35),
+        ])
+        .split(area);
+
+    let dots_count = (elapsed.as_millis() / 300 % 4) as usize;
+    let dots = ".".repeat(dots_count);
+
+    let intro_lines = vec![
+        Line::styled(
+            "Welcome to HALIIM Terminal",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::styled(
+            "Catch the Volatility. Own the Flow.",
+            Style::default().fg(Color::Yellow),
+        ),
+        Line::from(""),
+        Line::styled(
+            format!("Loading market intelligence{dots}"),
+            Style::default().fg(Color::Gray),
+        ),
+        Line::styled(
+            "Press any key to skip",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+
+    let intro = Paragraph::new(intro_lines)
+        .block(
+            Block::default()
+                .title(" HALIIM LP SCANNER ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .alignment(Alignment::Center);
+
+    frame.render_widget(intro, layout[1]);
 }
 
 async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
