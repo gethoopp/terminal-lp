@@ -345,6 +345,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" navigate  "),
         Span::styled("s", Style::default().fg(Color::Cyan)),
         Span::raw(" search  "),
+        Span::styled("o", Style::default().fg(Color::Cyan)),
+        Span::raw(" open mode  "),
         Span::styled("+/-", Style::default().fg(Color::Cyan)),
         Span::raw(" vol filter  "),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -386,6 +388,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    if app.open_link_mode {
+        spans.push(Span::raw("  |  "));
+        spans.push(Span::styled(
+            "OPEN MODE (M/Enter Meteora, D DexScreener, Esc cancel)",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let footer = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(Color::Gray));
@@ -410,10 +422,13 @@ fn render_help(frame: &mut Frame) {
         Line::from("  ← / →         Change sort column"),
         Line::from("  r             Reverse sort direction"),
         Line::from("  s             Enter search mode (type token name/symbol, Enter to keep)"),
+        Line::from("  o             Open mode: pilih tujuan link pair"),
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
         Line::from("  [ / ]         Decrease / increase min liquidity filter ($500 step)"),
-        Line::from("  Enter         Open pair URL in browser (if available)"),
+        Line::from("  Enter         Open pair in Meteora"),
+        Line::from("  m             (di Open mode) buka Meteora"),
+        Line::from("  d             (di Open mode) buka DexScreener"),
         Line::from("  Ctrl+C        Quit"),
         Line::from("  h             Toggle this help screen"),
         Line::from("  q / Esc       Quit"),

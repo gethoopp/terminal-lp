@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
 
 type FetchMessage = Result<api::FetchResult, String>;
+const METEORA_APP_URL: &str = "https://app.meteora.ag/";
+const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +68,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     continue;
                 }
 
+                if app.open_link_mode {
+                    handle_open_link_key(&mut app, key);
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -98,13 +105,10 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         app.apply_filters();
                     }
                     KeyCode::Enter => {
-                        if let Some(pair) = app.selected_pair() {
-                            if let Some(ref url) = pair.url {
-                                if let Err(err) = open::that(url) {
-                                    app.set_warning(format!("Failed to open URL: {err}"));
-                                }
-                            }
-                        }
+                        open_selected_pair_in_meteora(&mut app);
+                    }
+                    KeyCode::Char('o') => {
+                        app.start_open_link_mode();
                     }
                     KeyCode::Char('s') => {
                         app.start_search();
@@ -193,5 +197,124 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
             app.apply_filters();
         }
         _ => {}
+    }
+}
+
+fn handle_open_link_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.stop_open_link_mode();
+            app.set_warning(String::from("Open mode cancelled"));
+        }
+        KeyCode::Enter | KeyCode::Char('m') | KeyCode::Char('M') => {
+            app.stop_open_link_mode();
+            open_selected_pair_in_meteora(app);
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            app.stop_open_link_mode();
+            open_selected_pair_in_dexscreener(app);
+        }
+        _ => {}
+    }
+}
+
+fn open_selected_pair_in_meteora(app: &mut App) {
+    if let Some(pair) = app.selected_pair() {
+        let url = build_meteora_url(pair);
+        if let Err(err) = open::that(&url) {
+            app.set_warning(format!("Failed to open Meteora URL: {err}"));
+        } else {
+            app.set_warning(String::from("Opened pair in Meteora"));
+        }
+    }
+}
+
+fn open_selected_pair_in_dexscreener(app: &mut App) {
+    if let Some(pair) = app.selected_pair() {
+        if let Some(url) = pair.url.as_ref() {
+            if let Err(err) = open::that(url) {
+                app.set_warning(format!("Failed to open DexScreener URL: {err}"));
+            } else {
+                app.set_warning(String::from("Opened pair in DexScreener"));
+            }
+        } else {
+            app.set_warning(String::from(
+                "DexScreener URL is not available for this pair",
+            ));
+        }
+    }
+}
+
+fn build_meteora_url(pair: &api::PairData) -> String {
+    let base_mint = pair.base_token.address.as_deref();
+    let quote_mint = pair.quote_token.address.as_deref();
+
+    let output_mint = match base_mint {
+        Some(mint) if !mint.eq_ignore_ascii_case(SOL_MINT) => Some(mint),
+        _ => quote_mint.filter(|mint| !mint.eq_ignore_ascii_case(SOL_MINT)),
+    };
+
+    if let Some(output_mint) = output_mint {
+        return format!("{METEORA_APP_URL}?inputMint={SOL_MINT}&outputMint={output_mint}");
+    }
+
+    METEORA_APP_URL.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_meteora_url;
+    use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
+
+    fn sample_pair(base_mint: Option<&str>, quote_mint: Option<&str>) -> PairData {
+        PairData {
+            chain_id: "solana".to_string(),
+            dex_id: "raydium".to_string(),
+            base_token: TokenInfo {
+                name: Some("AAA".to_string()),
+                symbol: Some("AAA".to_string()),
+                address: base_mint.map(str::to_string),
+            },
+            quote_token: TokenInfo {
+                name: Some("USDC".to_string()),
+                symbol: Some("USDC".to_string()),
+                address: quote_mint.map(str::to_string),
+            },
+            price_usd: Some("1".to_string()),
+            price_change: Some(PriceChange {
+                m5: Some(0.0),
+                h1: Some(0.0),
+                h6: Some(0.0),
+                h24: Some(0.0),
+            }),
+            volume: Some(VolumeData {
+                h24: Some(1.0),
+                h6: Some(1.0),
+                h1: Some(1.0),
+                m5: Some(1.0),
+            }),
+            liquidity: Some(LiquidityData { usd: Some(1.0) }),
+            fdv: Some(1.0),
+            pair_created_at: Some(0),
+            pair_address: Some("pair".to_string()),
+            url: Some("https://dexscreener.com".to_string()),
+        }
+    }
+
+    #[test]
+    fn build_meteora_url_prefers_base_mint() {
+        let pair = sample_pair(
+            Some("TokenMint12345678901234567890123456789012345"),
+            Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+        );
+        let url = build_meteora_url(&pair);
+        assert!(url.contains("outputMint=TokenMint12345678901234567890123456789012345"));
+    }
+
+    #[test]
+    fn build_meteora_url_falls_back_to_home_when_missing_mints() {
+        let pair = sample_pair(None, None);
+        let url = build_meteora_url(&pair);
+        assert_eq!(url, "https://app.meteora.ag/");
     }
 }

@@ -96,6 +96,7 @@ pub struct App {
     pub min_liquidity_filter: f64,
     pub search_query: String,
     pub search_mode: bool,
+    pub open_link_mode: bool,
     pub is_loading: bool,
     pub show_help: bool,
     pub error_message: Option<String>,
@@ -116,6 +117,7 @@ impl App {
             min_liquidity_filter: 500.0,
             search_query: String::new(),
             search_mode: false,
+            open_link_mode: false,
             is_loading: true,
             show_help: false,
             error_message: None,
@@ -320,6 +322,16 @@ impl App {
         self.search_query.clear();
         self.apply_filters();
     }
+
+    pub fn start_open_link_mode(&mut self) {
+        self.open_link_mode = true;
+        self.status_message =
+            String::from("Open mode: press [m] Meteora, [d] DexScreener, [Esc] cancel");
+    }
+
+    pub fn stop_open_link_mode(&mut self) {
+        self.open_link_mode = false;
+    }
 }
 
 fn parse_usd(s: &Option<String>) -> f64 {
@@ -474,10 +486,12 @@ mod tests {
             base_token: TokenInfo {
                 name: Some(symbol.to_string()),
                 symbol: Some(symbol.to_string()),
+                address: Some("TokenMintAddress1111111111111111111111111".to_string()),
             },
             quote_token: TokenInfo {
                 name: Some("USDC".to_string()),
                 symbol: Some("USDC".to_string()),
+                address: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
             },
             price_usd: Some("1.0".to_string()),
             price_change: Some(PriceChange {
@@ -584,10 +598,12 @@ mod tests {
             base_token: TokenInfo {
                 name: Some("EMPTY".to_string()),
                 symbol: Some("EMP".to_string()),
+                address: None,
             },
             quote_token: TokenInfo {
                 name: Some("USDC".to_string()),
                 symbol: Some("USDC".to_string()),
+                address: None,
             },
             price_usd: None,
             price_change: None,

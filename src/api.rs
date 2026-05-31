@@ -40,6 +40,7 @@ pub struct PairData {
 pub struct TokenInfo {
     pub name: Option<String>,
     pub symbol: Option<String>,
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
