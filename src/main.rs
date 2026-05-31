@@ -498,35 +498,31 @@ async fn execute_bot_close(
 
 async fn post_bot_request(
     client: &reqwest::Client,
+    base_url: &str,
     endpoint: &str,
     body: &Value,
     api_key: &str,
 ) -> Result<Value, (Option<reqwest::StatusCode>, String)> {
-    let url = format!("{}/{}", bot_api_base_url().trim_end_matches('/'), endpoint);
+    let url = format!("{}/{}", base_url.trim_end_matches('/'), endpoint);
     let response = client
         .post(&url)
         .header("X-API-Key", api_key)
         .json(body)
         .send()
         .await
-        .map_err(|err| (None, format!("{endpoint} request error: {err}")))?;
+        .map_err(|err| (None, format!("{url} request error: {err}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err((
-            Some(status),
-            format!("{endpoint} failed with {status}: {text}"),
-        ));
+        return Err((Some(status), format!("{url} failed with {status}: {text}")));
     }
 
     let status = response.status();
-    response.json::<Value>().await.map_err(|err| {
-        (
-            Some(status),
-            format!("{endpoint} invalid JSON response: {err}"),
-        )
-    })
+    response
+        .json::<Value>()
+        .await
+        .map_err(|err| (Some(status), format!("{url} invalid JSON response: {err}")))
 }
 
 async fn post_bot_request_with_not_found_fallback(
@@ -536,23 +532,40 @@ async fn post_bot_request_with_not_found_fallback(
     body: &Value,
     api_key: &str,
 ) -> Result<Value, String> {
-    match post_bot_request(client, primary_endpoint, body, api_key).await {
-        Ok(value) => Ok(value),
-        Err((Some(status), primary_error)) if status == reqwest::StatusCode::NOT_FOUND => {
-            let mut errors = vec![primary_error];
-            for candidate in fallback_endpoints {
-                if *candidate == primary_endpoint {
+    let mut endpoint_candidates = vec![primary_endpoint.to_string()];
+    for candidate in fallback_endpoints {
+        if *candidate != primary_endpoint {
+            endpoint_candidates.push((*candidate).to_string());
+        }
+    }
+
+    let base_candidates = bot_api_base_url_candidates();
+    let mut errors = Vec::new();
+
+    for base_url in &base_candidates {
+        for endpoint in &endpoint_candidates {
+            match post_bot_request(client, base_url, endpoint, body, api_key).await {
+                Ok(value) => return Ok(value),
+                Err((Some(status), err)) if status == reqwest::StatusCode::NOT_FOUND => {
+                    errors.push(err);
                     continue;
                 }
-                match post_bot_request(client, candidate, body, api_key).await {
-                    Ok(value) => return Ok(value),
-                    Err((_status, err)) => errors.push(err),
-                }
+                Err((_status, err)) => return Err(err),
             }
-            Err(errors.join(" | "))
         }
-        Err((_status, err)) => Err(err),
     }
+
+    let bases = base_candidates.join(", ");
+    let endpoints = endpoint_candidates.join(", ");
+    if errors.is_empty() {
+        return Err(format!(
+            "Bot API 404 pada semua kombinasi base/endpoint. bases=[{bases}] endpoints=[{endpoints}]"
+        ));
+    }
+    Err(format!(
+        "{} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT. tried bases=[{bases}] endpoints=[{endpoints}]",
+        errors.join(" | ")
+    ))
 }
 
 fn bot_api_key() -> String {
@@ -561,6 +574,26 @@ fn bot_api_key() -> String {
 
 fn bot_api_base_url() -> String {
     env::var("BOT_API_BASE_URL").unwrap_or_else(|_| BOT_API_BASE_URL.to_string())
+}
+
+fn bot_api_base_url_candidates() -> Vec<String> {
+    let configured = bot_api_base_url().trim_end_matches('/').to_string();
+    let mut candidates = vec![configured.clone()];
+
+    if let Some(stripped) = configured.strip_suffix("/v1") {
+        let stripped = stripped.to_string();
+        if !stripped.is_empty() {
+            candidates.push(stripped.clone());
+            candidates.push(format!("{stripped}/api/v1"));
+        }
+    } else {
+        candidates.push(format!("{configured}/v1"));
+        candidates.push(format!("{configured}/api/v1"));
+    }
+
+    candidates.retain(|x| !x.is_empty());
+    candidates.dedup();
+    candidates
 }
 
 fn bot_open_endpoint() -> String {
@@ -700,7 +733,7 @@ fn build_meteora_url(pair: &api::PairData) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_meteora_url, validate_bot_response};
+    use super::{bot_api_base_url_candidates, build_meteora_url, validate_bot_response};
     use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
     use serde_json::json;
 
@@ -774,5 +807,21 @@ mod tests {
     fn validate_bot_response_accepts_success_true() {
         let payload = json!({ "success": true, "positionId": "abc123" });
         assert!(validate_bot_response(&payload).is_ok());
+    }
+
+    #[test]
+    fn bot_api_base_url_candidates_generate_variants() {
+        let previous = std::env::var("BOT_API_BASE_URL").ok();
+        std::env::set_var("BOT_API_BASE_URL", "http://localhost:20128/v1");
+        let candidates = bot_api_base_url_candidates();
+        assert!(candidates.contains(&"http://localhost:20128/v1".to_string()));
+        assert!(candidates.contains(&"http://localhost:20128".to_string()));
+        assert!(candidates.contains(&"http://localhost:20128/api/v1".to_string()));
+
+        if let Some(value) = previous {
+            std::env::set_var("BOT_API_BASE_URL", value);
+        } else {
+            std::env::remove_var("BOT_API_BASE_URL");
+        }
     }
 }
