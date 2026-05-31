@@ -65,7 +65,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     if app.is_loading {
-        let loading = Paragraph::new("Fetching data from DexScreener...")
+        let loading = Paragraph::new("Fetching data from DexScreener (Jupiter fallback active)...")
             .block(Block::default().borders(Borders::ALL))
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::Yellow));
@@ -124,7 +124,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({pair_count}) — ↑↓ scroll | ←→ sort | f DEX | w watchlist | W watchlist only | s search | +/-/[ ]/{{ }} filters | h help | q quit "
+            " Pairs ({pair_count}) — ↑↓ scroll | ←→ sort | f DEX | w watchlist | W watchlist only | s search | x export CSV | +/-/[ ]/{{ }} filters | h help | q quit "
         )))
         .row_highlight_style(highlight_style)
         .column_spacing(1);
@@ -447,6 +447,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" place  "),
         Span::styled("t", Style::default().fg(Color::Cyan)),
         Span::raw(" TP close  "),
+        Span::styled("x", Style::default().fg(Color::Cyan)),
+        Span::raw(" export CSV  "),
         Span::styled("+/-", Style::default().fg(Color::Cyan)),
         Span::raw(" vol filter  "),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -545,7 +547,7 @@ fn render_help(frame: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(" Data sourced from DexScreener API — free, public DEX aggregator"),
+        Line::from(" Data source: DexScreener API + Jupiter quote fallback"),
         Line::from(" Focus: Solana ecosystem (Meteora DLMM, Raydium, Orca, Jupiter)"),
         Line::from(""),
         Line::from(Span::styled(" Controls:", Style::default().fg(Color::Cyan))),
@@ -560,6 +562,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  p             Place position via local Meteora bot API"),
         Line::from("  t             Manual close for active bot position"),
         Line::from("  o             Open mode: pilih tujuan link pair"),
+        Line::from("  x             Export hasil pair + assessment ke CSV"),
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),
         Line::from("  [ / ]         Decrease / increase min liquidity filter ($500 step)"),
@@ -567,8 +570,8 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Enter         Open pair in Meteora"),
         Line::from("  m             (di Open mode) buka Meteora"),
         Line::from("  d             (di Open mode) buka DexScreener"),
-        Line::from("  Bot API       Base URL http://localhost:20128/v1"),
-        Line::from("  Env vars      BOT_API_KEY, BOT_OPEN_ENDPOINT, BOT_CLOSE_ENDPOINT"),
+        Line::from("  Config file   ~/.config/haliim-scanner/config.toml"),
+        Line::from("  Log file      ~/.local/share/haliim-scanner/scanner.log"),
         Line::from("  Ctrl+C        Quit"),
         Line::from("  h             Toggle this help screen"),
         Line::from("  q / Esc       Quit"),

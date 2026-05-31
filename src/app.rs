@@ -1,8 +1,9 @@
 use crate::api::PairData;
+use crate::config;
 use chrono::Local;
+use csv::Writer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::env;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -213,10 +214,20 @@ pub struct App {
     pub is_loading: bool,
     pub show_help: bool,
     pub error_message: Option<String>,
+    pub alerts_enabled: bool,
+    pub alert_threshold_pct: f64,
+    pub alert_cooldown_secs: u64,
+    alerted_pairs: HashMap<String, u64>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let app_cfg = config::active_config_opt()
+            .map(|cfg| cfg.app.clone())
+            .unwrap_or_default();
+        let alerts_cfg = config::active_config_opt()
+            .map(|cfg| cfg.alerts.clone())
+            .unwrap_or_default();
         let watchlist = load_watchlist();
         let active_bot_position = load_bot_position();
         let bot_status = if let Some(position) = active_bot_position.as_ref() {
@@ -240,9 +251,9 @@ impl App {
             selected_index: 0,
             status_message: String::from("Initializing..."),
             last_update: String::from("--"),
-            min_volume_filter: 1000.0,
-            min_liquidity_filter: 500.0,
-            min_market_cap_filter: 0.0,
+            min_volume_filter: app_cfg.initial_min_volume_filter,
+            min_liquidity_filter: app_cfg.initial_min_liquidity_filter,
+            min_market_cap_filter: app_cfg.initial_min_market_cap_filter,
             search_query: String::new(),
             search_mode: false,
             open_link_mode: false,
@@ -257,6 +268,10 @@ impl App {
             is_loading: true,
             show_help: false,
             error_message: None,
+            alerts_enabled: alerts_cfg.enabled,
+            alert_threshold_pct: alerts_cfg.change_24h_threshold_pct,
+            alert_cooldown_secs: alerts_cfg.cooldown_secs,
+            alerted_pairs: HashMap::new(),
         }
     }
 
@@ -669,6 +684,143 @@ impl App {
         self.bot_status = format!("BOT {action} ERROR: {err}");
     }
 
+    pub fn collect_price_alerts(&mut self) -> Vec<String> {
+        if !self.alerts_enabled || self.alert_threshold_pct <= 0.0 {
+            return Vec::new();
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let threshold = self.alert_threshold_pct.abs();
+        let mut alerts = Vec::new();
+
+        for pair in &self.pairs {
+            let change = pair
+                .price_change
+                .as_ref()
+                .and_then(|pc| pc.h24)
+                .unwrap_or(0.0);
+            if change.abs() < threshold {
+                continue;
+            }
+
+            let key = pair_watch_key(pair);
+            let can_notify = match self.alerted_pairs.get(&key) {
+                Some(last_at) => now.saturating_sub(*last_at) >= self.alert_cooldown_secs,
+                None => true,
+            };
+            if !can_notify {
+                continue;
+            }
+
+            self.alerted_pairs.insert(key, now);
+            let symbol = pair.base_token.symbol.as_deref().unwrap_or("UNKNOWN");
+            alerts.push(format!(
+                "ALERT {symbol}: 24h change {change:+.2}% (threshold {threshold:.2}%)"
+            ));
+        }
+
+        alerts
+    }
+
+    pub fn export_filtered_to_csv(&self, export_dir: &PathBuf) -> Result<PathBuf, String> {
+        fs::create_dir_all(export_dir).map_err(|err| {
+            format!(
+                "gagal membuat export directory {}: {err}",
+                export_dir.display()
+            )
+        })?;
+
+        let filename = format!(
+            "scanner_export_{}.csv",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        );
+        let file_path = export_dir.join(filename);
+
+        let mut writer = Writer::from_path(&file_path)
+            .map_err(|err| format!("gagal membuka CSV {}: {err}", file_path.display()))?;
+        writer
+            .write_record([
+                "symbol",
+                "name",
+                "dex",
+                "price_usd",
+                "change_1h_pct",
+                "change_24h_pct",
+                "volume_24h_usd",
+                "liquidity_usd",
+                "market_cap",
+                "fdv",
+                "signal",
+                "score",
+                "bias_summary",
+                "microstructure_summary",
+                "pair_url",
+            ])
+            .map_err(|err| format!("gagal menulis header CSV: {err}"))?;
+
+        for &pair_idx in &self.filtered_pairs {
+            let pair = match self.pairs.get(pair_idx) {
+                Some(p) => p,
+                None => continue,
+            };
+            let assessment = self.assessments.get(pair_idx);
+            let signal = assessment.map(|a| a.signal.label()).unwrap_or("PANTAU");
+            let score = assessment.map(|a| a.score).unwrap_or(50);
+            let bias = assessment
+                .map(|a| a.bias_summary.clone())
+                .unwrap_or_else(|| "-".to_string());
+            let micro = assessment
+                .map(|a| a.microstructure_summary.clone())
+                .unwrap_or_else(|| "-".to_string());
+
+            writer
+                .write_record([
+                    pair.base_token.symbol.as_deref().unwrap_or(""),
+                    pair.base_token.name.as_deref().unwrap_or(""),
+                    pair.dex_id.as_str(),
+                    pair.price_usd.as_deref().unwrap_or(""),
+                    &format!(
+                        "{:.4}",
+                        pair.price_change
+                            .as_ref()
+                            .and_then(|pc| pc.h1)
+                            .unwrap_or_default()
+                    ),
+                    &format!(
+                        "{:.4}",
+                        pair.price_change
+                            .as_ref()
+                            .and_then(|pc| pc.h24)
+                            .unwrap_or_default()
+                    ),
+                    &format!(
+                        "{:.4}",
+                        pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0)
+                    ),
+                    &format!(
+                        "{:.4}",
+                        pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0)
+                    ),
+                    &format!("{:.4}", pair.market_cap.unwrap_or(0.0)),
+                    &format!("{:.4}", pair.fdv.unwrap_or(0.0)),
+                    signal,
+                    &score.to_string(),
+                    &bias,
+                    &micro,
+                    pair.url.as_deref().unwrap_or(""),
+                ])
+                .map_err(|err| format!("gagal menulis row CSV: {err}"))?;
+        }
+
+        writer
+            .flush()
+            .map_err(|err| format!("gagal flush CSV {}: {err}", file_path.display()))?;
+        Ok(file_path)
+    }
+
     fn selected_pair_key(&self) -> Option<String> {
         self.filtered_pairs
             .get(self.selected_index)
@@ -835,27 +987,36 @@ fn pair_watch_key(pair: &PairData) -> String {
         })
 }
 
-fn watchlist_path() -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let mut path = PathBuf::from(home);
-    path.push(".haliim_terminal_watchlist.json");
-    Some(path)
+fn watchlist_path() -> PathBuf {
+    config::watchlist_file_path()
 }
 
-fn bot_position_path() -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let mut path = PathBuf::from(home);
-    path.push(".haliim_terminal_bot_position.json");
-    Some(path)
+fn bot_position_path() -> PathBuf {
+    config::bot_position_file_path()
+}
+
+fn legacy_watchlist_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".haliim_terminal_watchlist.json"))
+}
+
+fn legacy_bot_position_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".haliim_terminal_bot_position.json"))
 }
 
 fn load_watchlist() -> HashSet<String> {
-    let Some(path) = watchlist_path() else {
-        return HashSet::new();
-    };
-
-    let Ok(raw) = fs::read_to_string(path) else {
-        return HashSet::new();
+    let path = watchlist_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => {
+            if let Some(legacy) = legacy_watchlist_path() {
+                if let Ok(content) = fs::read_to_string(legacy) {
+                    return serde_json::from_str::<WatchlistStore>(&content)
+                        .map(|store| store.pairs.into_iter().collect())
+                        .unwrap_or_default();
+                }
+            }
+            return HashSet::new();
+        }
     };
 
     serde_json::from_str::<WatchlistStore>(&raw)
@@ -864,9 +1025,15 @@ fn load_watchlist() -> HashSet<String> {
 }
 
 fn save_watchlist(watchlist: &HashSet<String>) -> Result<(), String> {
-    let Some(path) = watchlist_path() else {
-        return Err(String::from("HOME tidak tersedia"));
-    };
+    let path = watchlist_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "gagal membuat direktori watchlist {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
 
     let mut pairs = watchlist.iter().cloned().collect::<Vec<_>>();
     pairs.sort();
@@ -877,16 +1044,24 @@ fn save_watchlist(watchlist: &HashSet<String>) -> Result<(), String> {
 }
 
 fn load_bot_position() -> Option<BotPosition> {
-    let path = bot_position_path()?;
-    let raw = fs::read_to_string(path).ok()?;
+    let path = bot_position_path();
+    let raw = fs::read_to_string(&path).ok().or_else(|| {
+        legacy_bot_position_path().and_then(|legacy| fs::read_to_string(legacy).ok())
+    })?;
     let store = serde_json::from_str::<BotPositionStore>(&raw).ok()?;
     store.active_position
 }
 
 fn save_bot_position(position: Option<&BotPosition>) -> Result<(), String> {
-    let Some(path) = bot_position_path() else {
-        return Err(String::from("HOME tidak tersedia"));
-    };
+    let path = bot_position_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "gagal membuat direktori bot position {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
 
     let store = BotPositionStore {
         active_position: position.cloned(),

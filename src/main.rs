@@ -1,5 +1,7 @@
 mod api;
 mod app;
+mod config;
+mod logger;
 mod ui;
 
 use app::{App, BotCloseInput, BotOpenInput, BotPosition};
@@ -12,24 +14,14 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde_json::{json, Value};
-use std::env;
+use std::io::Write;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
+use tracing::{error, info, warn};
 
 type FetchMessage = Result<api::FetchResult, String>;
 type BotMessage = Result<BotTaskResult, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
-const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const BOT_API_BASE_URL: &str = "http://localhost:20128/v1";
-const BOT_API_KEY_PLACEHOLDER: &str = "sk-2a14fb2176d78669-fr31su-94ad224b";
-const BOT_OPEN_ENDPOINT: &str = "positions/open";
-const BOT_CLOSE_ENDPOINT: &str = "positions/close";
-const BOT_OPEN_ENDPOINT_FALLBACKS: [&str; 2] = ["position/open", "trade/open"];
-const BOT_CLOSE_ENDPOINT_FALLBACKS: [&str; 2] = ["position/close", "trade/close"];
-const BOT_ROUTER_CHAT_ENDPOINT: &str = "chat/completions";
-const BOT_ROUTER_MODEL: &str = "kr/claude-opus-4.6";
-const BOT_EXECUTION_MODE: &str = "auto";
-const BOT_AUTH_MODE: &str = "both";
 
 enum BotTaskResult {
     Opened(BotPosition),
@@ -57,6 +49,14 @@ enum BotAuthMode {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    config::initialize_active_config().map_err(std::io::Error::other)?;
+    let _log_guard = logger::init().map_err(std::io::Error::other)?;
+    info!(
+        config_path = %config::config_file_path().display(),
+        data_dir = %config::app_data_dir().display(),
+        "scanner starting"
+    );
+
     let mut terminal = ratatui::init();
     terminal.clear()?;
     show_intro_screen(&mut terminal)?;
@@ -64,11 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_app(&mut terminal).await;
 
     ratatui::restore();
+    info!("scanner shutdown");
     result
 }
 
 fn show_intro_screen(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
-    let duration = Duration::from_millis(2300);
+    let duration = Duration::from_millis(config::active_config().app.intro_duration_ms);
     let started_at = Instant::now();
 
     loop {
@@ -141,19 +142,21 @@ fn render_intro(frame: &mut Frame, elapsed: Duration) {
 }
 
 async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = config::active_config();
     let mut app = App::new();
     let client = api::build_http_client().map_err(std::io::Error::other)?;
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel::<FetchMessage>();
     let (bot_tx, mut bot_rx) = mpsc::unbounded_channel::<BotMessage>();
     let mut fetch_in_flight = false;
     let mut bot_in_flight = false;
+    let export_dir = config::resolve_path(&cfg.export.directory);
 
     // Initial data fetch in background to keep UI responsive.
     request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
 
-    let tick_rate = Duration::from_millis(200);
-    let refresh_rate = Duration::from_secs(15);
-    let bot_check_rate = Duration::from_secs(15);
+    let tick_rate = Duration::from_millis(cfg.app.tick_rate_ms.max(1));
+    let refresh_rate = Duration::from_secs(cfg.app.refresh_rate_secs.max(1));
+    let bot_check_rate = Duration::from_secs(cfg.app.bot_check_rate_secs.max(1));
     let mut last_refresh = Instant::now();
     let mut last_bot_check = Instant::now();
 
@@ -296,6 +299,18 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                             app.set_warning(String::from("Refresh already in progress"));
                         }
                     }
+                    KeyCode::Char('x') | KeyCode::Char('X') => {
+                        match app.export_filtered_to_csv(&export_dir) {
+                            Ok(path) => {
+                                app.set_warning(format!("Exported CSV: {}", path.display()));
+                                info!(path = %path.display(), "csv export completed");
+                            }
+                            Err(err) => {
+                                app.set_warning(format!("CSV export failed: {err}"));
+                                warn!(error = %err, "csv export failed");
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -317,7 +332,9 @@ fn request_fetch(
 
     *fetch_in_flight = true;
     app.is_loading = true;
-    app.set_warning(String::from("Fetching data from DexScreener..."));
+    app.set_warning(String::from(
+        "Fetching data market (DexScreener/Jupiter fallback)...",
+    ));
 
     let tx = fetch_tx.clone();
     let client = client.clone();
@@ -338,12 +355,26 @@ fn drain_fetch_results(
                 match result {
                     Ok(data) => {
                         app.update_pairs(data.pairs);
+                        let alerts = app.collect_price_alerts();
+                        if !alerts.is_empty() {
+                            for alert in &alerts {
+                                warn!(alert = %alert, "price alert triggered");
+                            }
+                            if config::active_config().alerts.terminal_bell {
+                                for _ in 0..alerts.len().min(3) {
+                                    let _ = emit_terminal_bell();
+                                }
+                            }
+                            app.set_warning(alerts.join(" | "));
+                        }
                         if !data.warnings.is_empty() {
                             let warnings = data.warnings.join(" | ");
+                            warn!(warnings = %warnings, "fetch warnings");
                             app.set_warning(format!("Loaded with warnings: {warnings}"));
                         }
                     }
                     Err(e) => {
+                        error!(error = %e, "fetch failed");
                         app.set_error(e);
                     }
                 }
@@ -351,11 +382,17 @@ fn drain_fetch_results(
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 *fetch_in_flight = false;
+                error!("background fetch channel disconnected");
                 app.set_error(String::from("Background fetch channel disconnected"));
                 break;
             }
         }
     }
+}
+
+fn emit_terminal_bell() -> std::io::Result<()> {
+    print!("\x07");
+    std::io::stdout().flush()
 }
 
 fn request_bot_open(
@@ -451,10 +488,12 @@ async fn execute_bot_open(
     });
 
     let action_payload = body.clone();
+    let endpoint = bot_open_endpoint();
+    let fallback_endpoints = bot_open_endpoint_fallbacks();
     let response = post_bot_request_with_not_found_fallback(
         client,
-        &bot_open_endpoint(),
-        &BOT_OPEN_ENDPOINT_FALLBACKS,
+        &endpoint,
+        &fallback_endpoints,
         &body,
         &api_key,
         "open",
@@ -499,10 +538,12 @@ async fn execute_bot_close(
     });
 
     let action_payload = body.clone();
+    let endpoint = bot_close_endpoint();
+    let fallback_endpoints = bot_close_endpoint_fallbacks();
     let response = post_bot_request_with_not_found_fallback(
         client,
-        &bot_close_endpoint(),
-        &BOT_CLOSE_ENDPOINT_FALLBACKS,
+        &endpoint,
+        &fallback_endpoints,
         &body,
         &api_key,
         "close",
@@ -564,7 +605,7 @@ async fn post_bot_request(
 async fn post_bot_request_with_not_found_fallback(
     client: &reqwest::Client,
     primary_endpoint: &str,
-    fallback_endpoints: &[&str],
+    fallback_endpoints: &[String],
     body: &Value,
     api_key: &str,
     action: &str,
@@ -583,8 +624,8 @@ async fn post_bot_request_with_not_found_fallback(
 
     let mut endpoint_candidates = vec![primary_endpoint.to_string()];
     for candidate in fallback_endpoints {
-        if *candidate != primary_endpoint {
-            endpoint_candidates.push((*candidate).to_string());
+        if candidate != primary_endpoint {
+            endpoint_candidates.push(candidate.to_string());
         }
     }
 
@@ -619,7 +660,7 @@ async fn post_bot_request_with_not_found_fallback(
 
     if let Some(router_err) = router_first_error {
         return Err(format!(
-            "9router route gagal: {router_err} | {} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL/BOT_AUTH_MODE. tried bases=[{bases}] endpoints=[{endpoints}]",
+            "9router route gagal: {router_err} | {} | Cek file config.toml bagian [bot]. tried bases=[{bases}] endpoints=[{endpoints}]",
             errors.join(" | ")
         ));
     }
@@ -628,18 +669,18 @@ async fn post_bot_request_with_not_found_fallback(
     match router_result {
         Ok(value) => Ok(value),
         Err(router_err) => Err(format!(
-            "{} | 9router fallback gagal: {router_err} | Cek BOT_API_BASE_URL/BOT_OPEN_ENDPOINT/BOT_CLOSE_ENDPOINT/BOT_ROUTER_MODEL/BOT_AUTH_MODE. tried bases=[{bases}] endpoints=[{endpoints}]",
+            "{} | 9router fallback gagal: {router_err} | Cek file config.toml bagian [bot]. tried bases=[{bases}] endpoints=[{endpoints}]",
             errors.join(" | ")
         )),
     }
 }
 
 fn bot_api_key() -> String {
-    env::var("BOT_API_KEY").unwrap_or_else(|_| BOT_API_KEY_PLACEHOLDER.to_string())
+    config::active_config().bot.api_key.clone()
 }
 
 fn bot_api_base_url() -> String {
-    env::var("BOT_API_BASE_URL").unwrap_or_else(|_| BOT_API_BASE_URL.to_string())
+    config::active_config().bot.api_base_url.clone()
 }
 
 fn bot_api_base_url_candidates() -> Vec<String> {
@@ -663,27 +704,31 @@ fn bot_api_base_url_candidates() -> Vec<String> {
 }
 
 fn bot_open_endpoint() -> String {
-    env::var("BOT_OPEN_ENDPOINT").unwrap_or_else(|_| BOT_OPEN_ENDPOINT.to_string())
+    config::active_config().bot.open_endpoint.clone()
 }
 
 fn bot_close_endpoint() -> String {
-    env::var("BOT_CLOSE_ENDPOINT").unwrap_or_else(|_| BOT_CLOSE_ENDPOINT.to_string())
+    config::active_config().bot.close_endpoint.clone()
+}
+
+fn bot_open_endpoint_fallbacks() -> Vec<String> {
+    config::active_config().bot.open_endpoint_fallbacks.clone()
+}
+
+fn bot_close_endpoint_fallbacks() -> Vec<String> {
+    config::active_config().bot.close_endpoint_fallbacks.clone()
+}
+
+fn bot_router_chat_endpoint() -> String {
+    config::active_config().bot.router_chat_endpoint.clone()
 }
 
 fn bot_router_model() -> String {
-    env::var("BOT_ROUTER_MODEL").unwrap_or_else(|_| BOT_ROUTER_MODEL.to_string())
+    config::active_config().bot.router_model.clone()
 }
 
 fn bot_router_models() -> Vec<String> {
-    let configured = env::var("BOT_ROUTER_MODELS")
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let configured = config::active_config().bot.router_models.clone();
 
     let mut models = Vec::new();
     if !configured.is_empty() {
@@ -700,7 +745,14 @@ fn bot_router_models() -> Vec<String> {
 }
 
 fn bot_execution_mode() -> BotMode {
-    let mode = env::var("BOT_EXECUTION_MODE").unwrap_or_else(|_| BOT_EXECUTION_MODE.to_string());
+    parse_bot_mode(config::active_config().bot.execution_mode.as_str())
+}
+
+fn bot_auth_mode() -> BotAuthMode {
+    parse_bot_auth_mode(config::active_config().bot.auth_mode.as_str())
+}
+
+fn parse_bot_mode(mode: &str) -> BotMode {
     match mode.to_ascii_lowercase().as_str() {
         "router" => BotMode::Router,
         "direct" => BotMode::Direct,
@@ -708,8 +760,7 @@ fn bot_execution_mode() -> BotMode {
     }
 }
 
-fn bot_auth_mode() -> BotAuthMode {
-    let mode = env::var("BOT_AUTH_MODE").unwrap_or_else(|_| BOT_AUTH_MODE.to_string());
+fn parse_bot_auth_mode(mode: &str) -> BotAuthMode {
     match mode.to_ascii_lowercase().as_str() {
         "bearer" => BotAuthMode::Bearer,
         "x-api-key" | "xapikey" | "x_api_key" => BotAuthMode::XApiKey,
@@ -760,6 +811,7 @@ Return ONLY strict JSON object with keys: success(boolean), positionId(string op
 Payload: {action_payload}"
     );
     let base_candidates = bot_api_base_url_candidates();
+    let router_endpoint = bot_router_chat_endpoint();
     let model_candidates = bot_router_models();
     let mut errors = Vec::new();
 
@@ -780,21 +832,14 @@ Payload: {action_payload}"
                 ]
             });
 
-            let response = match post_bot_request(
-                client,
-                base,
-                BOT_ROUTER_CHAT_ENDPOINT,
-                &body,
-                api_key,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err((_status, err)) => {
-                    errors.push(err);
-                    continue;
-                }
-            };
+            let response =
+                match post_bot_request(client, base, &router_endpoint, &body, api_key).await {
+                    Ok(v) => v,
+                    Err((_status, err)) => {
+                        errors.push(err);
+                        continue;
+                    }
+                };
 
             let Some(content) = extract_first_choice_content(&response) else {
                 errors.push(format!(
@@ -942,16 +987,17 @@ fn open_selected_pair_in_dexscreener(app: &mut App) {
 }
 
 fn build_meteora_url(pair: &api::PairData) -> String {
+    let native_sol_mint = &config::active_config().api.jupiter_input_mint;
     let base_mint = pair.base_token.address.as_deref();
     let quote_mint = pair.quote_token.address.as_deref();
 
     let output_mint = match base_mint {
-        Some(mint) if !mint.eq_ignore_ascii_case(SOL_MINT) => Some(mint),
-        _ => quote_mint.filter(|mint| !mint.eq_ignore_ascii_case(SOL_MINT)),
+        Some(mint) if !mint.eq_ignore_ascii_case(native_sol_mint) => Some(mint),
+        _ => quote_mint.filter(|mint| !mint.eq_ignore_ascii_case(native_sol_mint)),
     };
 
     if let Some(output_mint) = output_mint {
-        return format!("{METEORA_APP_URL}?inputMint={SOL_MINT}&outputMint={output_mint}");
+        return format!("{METEORA_APP_URL}?inputMint={native_sol_mint}&outputMint={output_mint}");
     }
 
     METEORA_APP_URL.to_string()
@@ -960,11 +1006,23 @@ fn build_meteora_url(pair: &api::PairData) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bot_api_base_url_candidates, bot_auth_mode, bot_execution_mode, bot_router_models,
-        build_meteora_url, should_prefer_router, validate_bot_response, BotAuthMode, BotMode,
+        bot_api_base_url_candidates, bot_router_models, build_meteora_url, parse_bot_auth_mode,
+        parse_bot_mode, should_prefer_router, validate_bot_response, BotAuthMode, BotMode,
     };
-    use crate::api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData};
+    use crate::{
+        api::{LiquidityData, PairData, PriceChange, TokenInfo, VolumeData},
+        config,
+    };
     use serde_json::json;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn init_test_config() {
+        INIT.call_once(|| {
+            let _ = config::initialize_active_config();
+        });
+    }
 
     fn sample_pair(base_mint: Option<&str>, quote_mint: Option<&str>) -> PairData {
         PairData {
@@ -1005,6 +1063,7 @@ mod tests {
 
     #[test]
     fn build_meteora_url_prefers_base_mint() {
+        init_test_config();
         let pair = sample_pair(
             Some("TokenMint12345678901234567890123456789012345"),
             Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
@@ -1015,6 +1074,7 @@ mod tests {
 
     #[test]
     fn build_meteora_url_falls_back_to_home_when_missing_mints() {
+        init_test_config();
         let pair = sample_pair(None, None);
         let url = build_meteora_url(&pair);
         assert_eq!(url, "https://app.meteora.ag/");
@@ -1040,52 +1100,36 @@ mod tests {
 
     #[test]
     fn bot_api_base_url_candidates_generate_variants() {
-        let previous = std::env::var("BOT_API_BASE_URL").ok();
-        std::env::set_var("BOT_API_BASE_URL", "http://localhost:20128/v1");
+        init_test_config();
         let candidates = bot_api_base_url_candidates();
         assert!(candidates.contains(&"http://localhost:20128/v1".to_string()));
         assert!(candidates.contains(&"http://localhost:20128".to_string()));
         assert!(candidates.contains(&"http://localhost:20128/api/v1".to_string()));
-
-        if let Some(value) = previous {
-            std::env::set_var("BOT_API_BASE_URL", value);
-        } else {
-            std::env::remove_var("BOT_API_BASE_URL");
-        }
     }
 
     #[test]
-    fn bot_modes_are_parsed_from_env() {
-        std::env::set_var("BOT_EXECUTION_MODE", "router");
-        assert_eq!(bot_execution_mode(), BotMode::Router);
-        assert!(should_prefer_router());
-
-        std::env::set_var("BOT_EXECUTION_MODE", "direct");
-        assert_eq!(bot_execution_mode(), BotMode::Direct);
-        assert!(!should_prefer_router());
-
-        std::env::set_var("BOT_EXECUTION_MODE", "auto");
-        std::env::set_var("BOT_API_BASE_URL", "http://localhost:20128/v1");
-        assert_eq!(bot_execution_mode(), BotMode::Auto);
+    fn bot_modes_are_parsed_from_config_values() {
+        assert_eq!(parse_bot_mode("router"), BotMode::Router);
+        assert_eq!(parse_bot_mode("direct"), BotMode::Direct);
+        assert_eq!(parse_bot_mode("auto"), BotMode::Auto);
+        assert_eq!(parse_bot_mode("unknown"), BotMode::Auto);
+        init_test_config();
         assert!(should_prefer_router());
     }
 
     #[test]
-    fn bot_auth_modes_are_parsed_from_env() {
-        std::env::set_var("BOT_AUTH_MODE", "bearer");
-        assert_eq!(bot_auth_mode(), BotAuthMode::Bearer);
-        std::env::set_var("BOT_AUTH_MODE", "x-api-key");
-        assert_eq!(bot_auth_mode(), BotAuthMode::XApiKey);
-        std::env::set_var("BOT_AUTH_MODE", "both");
-        assert_eq!(bot_auth_mode(), BotAuthMode::Both);
+    fn bot_auth_modes_are_parsed_from_config_values() {
+        assert_eq!(parse_bot_auth_mode("bearer"), BotAuthMode::Bearer);
+        assert_eq!(parse_bot_auth_mode("x-api-key"), BotAuthMode::XApiKey);
+        assert_eq!(parse_bot_auth_mode("both"), BotAuthMode::Both);
+        assert_eq!(parse_bot_auth_mode("unknown"), BotAuthMode::Both);
     }
 
     #[test]
-    fn bot_router_models_support_csv_env() {
-        std::env::set_var("BOT_ROUTER_MODELS", "model-a, model-b");
+    fn bot_router_models_include_defaults() {
+        init_test_config();
         let models = bot_router_models();
-        assert!(models.contains(&"model-a".to_string()));
-        assert!(models.contains(&"model-b".to_string()));
+        assert!(models.contains(&"kr/claude-opus-4.6".to_string()));
         assert!(models.contains(&"openrouter/auto".to_string()));
     }
 }
