@@ -80,6 +80,7 @@ impl TradeSignal {
 pub struct PairAssessment {
     pub signal: TradeSignal,
     pub score: i32,
+    pub bias_summary: String,
     pub notes: Vec<String>,
 }
 
@@ -366,6 +367,74 @@ const MOMENTUM_5M_DUMP_MAX: f64 = -4.0;
 const VOL_LIQ_RATIO_HEALTHY_MIN: f64 = 0.7;
 const VOL_LIQ_RATIO_HEALTHY_MAX: f64 = 8.0;
 const VOL_LIQ_RATIO_OVERHEATED_MIN: f64 = 15.0;
+const PRESSURE_DOMINANCE_RATIO: f64 = 1.2;
+const PRESSURE_MIN_CONFIDENCE_TXNS: f64 = 15.0;
+
+fn symbol_or_unknown(symbol: Option<&str>) -> &str {
+    symbol.unwrap_or("UNKNOWN")
+}
+
+fn weighted_pressure(pair: &PairData) -> Option<(f64, f64)> {
+    let txns = pair.txns.as_ref()?;
+    let m5 = txns.m5.as_ref();
+    let h1 = txns.h1.as_ref();
+    let h24 = txns.h24.as_ref();
+
+    let mut buys = 0.0;
+    let mut sells = 0.0;
+    let mut weight_sum = 0.0;
+
+    if let Some(window) = h1 {
+        buys += window.buys.unwrap_or(0.0) * 0.7;
+        sells += window.sells.unwrap_or(0.0) * 0.7;
+        weight_sum += 0.7;
+    }
+    if let Some(window) = m5 {
+        buys += window.buys.unwrap_or(0.0) * 0.3;
+        sells += window.sells.unwrap_or(0.0) * 0.3;
+        weight_sum += 0.3;
+    }
+
+    if weight_sum > 0.0 {
+        return Some((buys, sells));
+    }
+
+    h24.map(|window| (window.buys.unwrap_or(0.0), window.sells.unwrap_or(0.0)))
+}
+
+fn pressure_bias_summary(pair: &PairData) -> String {
+    let base_symbol = symbol_or_unknown(pair.base_token.symbol.as_deref());
+    let quote_symbol = symbol_or_unknown(pair.quote_token.symbol.as_deref());
+
+    let Some((buys, sells)) = weighted_pressure(pair) else {
+        return format!(
+            "Data tekanan beli/jual belum cukup untuk pasangan {base_symbol}/{quote_symbol}."
+        );
+    };
+
+    let total = buys + sells;
+    if total < PRESSURE_MIN_CONFIDENCE_TXNS {
+        return format!(
+            "Aktivitas tx rendah pada {base_symbol}/{quote_symbol} (buy {buys:.1} vs sell {sells:.1}); tunggu konfirmasi."
+        );
+    }
+
+    if sells > buys * PRESSURE_DOMINANCE_RATIO {
+        return format!(
+            "Tekanan jual dominan (buy {buys:.1} vs sell {sells:.1}) -> bias pilih {base_symbol}. Contoh RAY/SOL: cenderung pilih RAY."
+        );
+    }
+
+    if buys > sells * PRESSURE_DOMINANCE_RATIO {
+        return format!(
+            "Tekanan beli dominan (buy {buys:.1} vs sell {sells:.1}) -> bias pilih {quote_symbol}. Contoh RAY/SOL: cenderung pilih SOL."
+        );
+    }
+
+    format!(
+        "Tekanan beli/jual relatif seimbang (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol}."
+    )
+}
 
 pub fn assess_pair(pair: &PairData) -> PairAssessment {
     let change_24h = pair
@@ -393,6 +462,7 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
 
     let mut score = SCORE_BASELINE;
     let mut notes = Vec::new();
+    let bias_summary = pressure_bias_summary(pair);
 
     if liquidity >= LIQUIDITY_STRONG_USD {
         score += 12;
@@ -453,6 +523,17 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         notes.push("Volume terlalu agresif vs likuiditas, rawan volatilitas ekstrem.".to_string());
     }
 
+    if let Some((buys, sells)) = weighted_pressure(pair) {
+        let total = buys + sells;
+        if total >= PRESSURE_MIN_CONFIDENCE_TXNS {
+            if sells > buys * PRESSURE_DOMINANCE_RATIO {
+                score += 4;
+            } else if buys > sells * PRESSURE_DOMINANCE_RATIO {
+                score -= 4;
+            }
+        }
+    }
+
     score = score.clamp(0, 100);
 
     let signal = if score >= SCORE_GOOD_ENTRY_MIN {
@@ -470,6 +551,7 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
     PairAssessment {
         signal,
         score,
+        bias_summary,
         notes,
     }
 }
@@ -477,7 +559,7 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{LiquidityData, PriceChange, TokenInfo, VolumeData};
+    use crate::api::{LiquidityData, PriceChange, TokenInfo, TxnSideCount, TxnsData, VolumeData};
 
     fn sample_pair(symbol: &str, volume: f64, liquidity: f64) -> PairData {
         PairData {
@@ -499,6 +581,20 @@ mod tests {
                 h1: Some(1.0),
                 h6: Some(2.0),
                 h24: Some(3.0),
+            }),
+            txns: Some(TxnsData {
+                m5: Some(TxnSideCount {
+                    buys: Some(30.0),
+                    sells: Some(20.0),
+                }),
+                h1: Some(TxnSideCount {
+                    buys: Some(120.0),
+                    sells: Some(80.0),
+                }),
+                h24: Some(TxnSideCount {
+                    buys: Some(500.0),
+                    sells: Some(420.0),
+                }),
             }),
             volume: Some(VolumeData {
                 h24: Some(volume),
@@ -607,6 +703,7 @@ mod tests {
             },
             price_usd: None,
             price_change: None,
+            txns: None,
             volume: None,
             liquidity: None,
             fdv: None,
@@ -618,5 +715,45 @@ mod tests {
         let assessed = assess_pair(&pair);
         assert!((0..=100).contains(&assessed.score));
         assert!(!assessed.notes.is_empty());
+    }
+
+    #[test]
+    fn assess_pair_explains_sell_pressure_bias_to_base_token() {
+        let mut pair = sample_pair("RAY", 400_000.0, 140_000.0);
+        pair.quote_token.symbol = Some("SOL".to_string());
+        pair.txns = Some(TxnsData {
+            m5: Some(TxnSideCount {
+                buys: Some(10.0),
+                sells: Some(20.0),
+            }),
+            h1: Some(TxnSideCount {
+                buys: Some(40.0),
+                sells: Some(120.0),
+            }),
+            h24: None,
+        });
+
+        let assessed = assess_pair(&pair);
+        assert!(assessed.bias_summary.contains("bias pilih RAY"));
+    }
+
+    #[test]
+    fn assess_pair_explains_buy_pressure_bias_to_quote_token() {
+        let mut pair = sample_pair("RAY", 400_000.0, 140_000.0);
+        pair.quote_token.symbol = Some("SOL".to_string());
+        pair.txns = Some(TxnsData {
+            m5: Some(TxnSideCount {
+                buys: Some(20.0),
+                sells: Some(10.0),
+            }),
+            h1: Some(TxnSideCount {
+                buys: Some(130.0),
+                sells: Some(40.0),
+            }),
+            h24: None,
+        });
+
+        let assessed = assess_pair(&pair);
+        assert!(assessed.bias_summary.contains("bias pilih SOL"));
     }
 }

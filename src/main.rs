@@ -287,6 +287,7 @@ mod tests {
                 h6: Some(0.0),
                 h24: Some(0.0),
             }),
+            txns: None,
             volume: Some(VolumeData {
                 h24: Some(1.0),
                 h6: Some(1.0),

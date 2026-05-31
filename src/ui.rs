@@ -285,6 +285,10 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .map(|a| a.signal)
             .unwrap_or(TradeSignal::Watchlist);
         let score = assessment.as_ref().map(|a| a.score).unwrap_or(50);
+        let bias_summary = assessment
+            .as_ref()
+            .map(|a| a.bias_summary.as_str())
+            .unwrap_or("Data bias pair belum tersedia.");
         let notes = assessment
             .as_ref()
             .map(|a| a.notes.clone())
@@ -301,6 +305,10 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("Rekomendasi: ", Style::default().fg(Color::Cyan)),
                 Span::styled(signal.label(), signal_style(signal)),
                 Span::raw(format!("  |  Score: {score}/100")),
+            ]),
+            Line::from(vec![
+                Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
+                Span::raw(bias_summary.to_string()),
             ]),
         ];
 

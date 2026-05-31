@@ -25,6 +25,7 @@ pub struct PairData {
     pub price_usd: Option<String>,
     #[serde(rename = "priceChange")]
     pub price_change: Option<PriceChange>,
+    pub txns: Option<TxnsData>,
     pub volume: Option<VolumeData>,
     pub liquidity: Option<LiquidityData>,
     #[serde(rename = "fdv")]
@@ -34,6 +35,19 @@ pub struct PairData {
     #[serde(rename = "pairAddress")]
     pub pair_address: Option<String>,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxnsData {
+    pub m5: Option<TxnSideCount>,
+    pub h1: Option<TxnSideCount>,
+    pub h24: Option<TxnSideCount>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxnSideCount {
+    pub buys: Option<f64>,
+    pub sells: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
