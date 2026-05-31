@@ -199,6 +199,15 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Char('o') => {
                         app.start_open_link_mode();
                     }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        app.cycle_dex_filter();
+                    }
+                    KeyCode::Char('w') => {
+                        app.toggle_selected_watchlist();
+                    }
+                    KeyCode::Char('W') => {
+                        app.toggle_watchlist_only();
+                    }
                     KeyCode::Char('s') => {
                         app.start_search();
                     }

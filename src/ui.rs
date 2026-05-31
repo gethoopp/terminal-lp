@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),     // table
-            Constraint::Length(10), // analysis
+            Constraint::Length(12), // analysis
         ])
         .split(main_layout[1]);
 
@@ -124,7 +124,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({pair_count}) — ↑↓ scroll | ← → sort col | s search mode | +/-/[ ]/{{ }} filters | h help | q quit "
+            " Pairs ({pair_count}) — ↑↓ scroll | ←→ sort | f DEX | w watchlist | W watchlist only | s search | +/-/[ ]/{{ }} filters | h help | q quit "
         )))
         .row_highlight_style(highlight_style)
         .column_spacing(1);
@@ -294,6 +294,19 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .as_ref()
             .map(|a| a.bias_summary.as_str())
             .unwrap_or("Data bias pair belum tersedia.");
+        let microstructure_summary = assessment
+            .as_ref()
+            .map(|a| a.microstructure_summary.as_str())
+            .unwrap_or("Data microstructure belum tersedia.");
+        let il_estimate = assessment
+            .as_ref()
+            .and_then(|a| a.il_estimate_24h_pct)
+            .map(|il| format!("{il:.2}%"))
+            .unwrap_or_else(|| "--".to_string());
+        let health_bar = assessment
+            .as_ref()
+            .map(|a| a.health_bar.as_str())
+            .unwrap_or("N/A");
         let notes = assessment
             .as_ref()
             .map(|a| a.notes.clone())
@@ -303,6 +316,8 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
         let fdv_mcap_ratio = app.selected_fdv_mcap_ratio();
         let shown_notes = notes.iter().take(3).collect::<Vec<_>>();
         let hidden_count = notes.len().saturating_sub(shown_notes.len());
+        let is_watchlisted = app.selected_in_watchlist();
+        let watchlist_badge = if is_watchlisted { "ON" } else { "OFF" };
         let ratio_text = fdv_mcap_ratio
             .map(|v| format!("{v:.2}x"))
             .unwrap_or_else(|| "--".to_string());
@@ -310,7 +325,20 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
                 Span::styled(symbol, Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(" ({name})")),
+                Span::raw(format!(" ({name}) | DEX: {}", pair.dex_id)),
+            ]),
+            Line::from(vec![
+                Span::styled("Watchlist: ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    watchlist_badge,
+                    if is_watchlisted {
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Rekomendasi: ", Style::default().fg(Color::Cyan)),
@@ -327,8 +355,20 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 )),
             ]),
             Line::from(vec![
+                Span::styled("Health Bar: ", Style::default().fg(Color::Cyan)),
+                Span::raw(health_bar.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled("IL Est. 24h: ", Style::default().fg(Color::Cyan)),
+                Span::raw(il_estimate),
+            ]),
+            Line::from(vec![
                 Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
                 Span::raw(bias_summary.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled("Microstructure: ", Style::default().fg(Color::Cyan)),
+                Span::raw(microstructure_summary.to_string()),
             ]),
         ];
 
@@ -375,6 +415,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" search  "),
         Span::styled("o", Style::default().fg(Color::Cyan)),
         Span::raw(" open mode  "),
+        Span::styled("f", Style::default().fg(Color::Cyan)),
+        Span::raw(" DEX filter  "),
+        Span::styled("w", Style::default().fg(Color::Cyan)),
+        Span::raw(" watchlist  "),
+        Span::styled("W", Style::default().fg(Color::Cyan)),
+        Span::raw(" watchlist only  "),
         Span::styled("+/-", Style::default().fg(Color::Cyan)),
         Span::raw(" vol filter  "),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -404,6 +450,20 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled(
         format_usd(app.min_market_cap_filter),
         Style::default().fg(Color::Yellow),
+    ));
+    spans.push(Span::raw("  DEX: "));
+    spans.push(Span::styled(
+        app.dex_filter.label(),
+        Style::default().fg(Color::Yellow),
+    ));
+    spans.push(Span::raw("  WL only: "));
+    spans.push(Span::styled(
+        if app.watchlist_only { "ON" } else { "OFF" },
+        if app.watchlist_only {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
     ));
 
     if !app.search_query.is_empty() {
@@ -457,7 +517,10 @@ fn render_help(frame: &mut Frame) {
         Line::from("  ↑ / ↓         Navigate pair list"),
         Line::from("  ← / →         Change sort column"),
         Line::from("  r             Reverse sort direction"),
+        Line::from("  f             Cycle DEX filter (All/Meteora/Raydium/Orca/PumpSwap)"),
         Line::from("  s             Enter search mode (type token name/symbol, Enter to keep)"),
+        Line::from("  w             Toggle selected pair in watchlist (persisted local JSON)"),
+        Line::from("  W             Toggle watchlist-only mode"),
         Line::from("  o             Open mode: pilih tujuan link pair"),
         Line::from("  Esc           Clear search and exit search mode"),
         Line::from("  + / -         Increase / decrease min volume filter ($1K step)"),

@@ -1,5 +1,10 @@
 use crate::api::PairData;
 use chrono::Local;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +69,48 @@ impl SortDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DexFilter {
+    All,
+    Meteora,
+    Raydium,
+    Orca,
+    PumpSwap,
+}
+
+impl DexFilter {
+    pub fn next(&self) -> Self {
+        match self {
+            DexFilter::All => DexFilter::Meteora,
+            DexFilter::Meteora => DexFilter::Raydium,
+            DexFilter::Raydium => DexFilter::Orca,
+            DexFilter::Orca => DexFilter::PumpSwap,
+            DexFilter::PumpSwap => DexFilter::All,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DexFilter::All => "All",
+            DexFilter::Meteora => "Meteora",
+            DexFilter::Raydium => "Raydium",
+            DexFilter::Orca => "Orca",
+            DexFilter::PumpSwap => "PumpSwap",
+        }
+    }
+
+    pub fn matches(&self, dex_id: &str) -> bool {
+        let normalized = dex_id.to_ascii_lowercase();
+        match self {
+            DexFilter::All => true,
+            DexFilter::Meteora => normalized.contains("meteora"),
+            DexFilter::Raydium => normalized.contains("raydium"),
+            DexFilter::Orca => normalized.contains("orca"),
+            DexFilter::PumpSwap => normalized.contains("pumpswap"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeSignal {
     GoodEntry,
     Watchlist,
@@ -85,7 +132,15 @@ pub struct PairAssessment {
     pub signal: TradeSignal,
     pub score: i32,
     pub bias_summary: String,
+    pub microstructure_summary: String,
+    pub il_estimate_24h_pct: Option<f64>,
+    pub health_bar: String,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct WatchlistStore {
+    pairs: Vec<String>,
 }
 
 pub struct App {
@@ -94,6 +149,7 @@ pub struct App {
     pub filtered_pairs: Vec<usize>,
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
+    pub dex_filter: DexFilter,
     pub selected_index: usize,
     pub status_message: String,
     pub last_update: String,
@@ -103,6 +159,8 @@ pub struct App {
     pub search_query: String,
     pub search_mode: bool,
     pub open_link_mode: bool,
+    pub watchlist_only: bool,
+    watchlist: HashSet<String>,
     pub is_loading: bool,
     pub show_help: bool,
     pub error_message: Option<String>,
@@ -110,12 +168,14 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let watchlist = load_watchlist();
         App {
             pairs: Vec::new(),
             assessments: Vec::new(),
             filtered_pairs: Vec::new(),
             sort_column: SortColumn::Change24h,
             sort_direction: SortDirection::Descending,
+            dex_filter: DexFilter::All,
             selected_index: 0,
             status_message: String::from("Initializing..."),
             last_update: String::from("--"),
@@ -125,6 +185,8 @@ impl App {
             search_query: String::new(),
             search_mode: false,
             open_link_mode: false,
+            watchlist_only: false,
+            watchlist,
             is_loading: true,
             show_help: false,
             error_message: None,
@@ -174,6 +236,17 @@ impl App {
                     return false;
                 }
 
+                if !self.dex_filter.matches(&pair.dex_id) {
+                    return false;
+                }
+
+                if self.watchlist_only {
+                    let pair_key = pair_watch_key(pair);
+                    if !self.watchlist.contains(&pair_key) {
+                        return false;
+                    }
+                }
+
                 if !query.is_empty() {
                     let symbol = pair
                         .base_token
@@ -199,8 +272,10 @@ impl App {
         let vol = self.min_volume_filter;
         let liq = self.min_liquidity_filter;
         let mcap = self.min_market_cap_filter;
+        let dex = self.dex_filter.label();
+        let wl = if self.watchlist_only { "ON" } else { "OFF" };
         self.status_message = format!(
-            "Showing {filtered}/{total} pairs | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}"
+            "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}"
         );
     }
 
@@ -362,6 +437,54 @@ impl App {
     pub fn stop_open_link_mode(&mut self) {
         self.open_link_mode = false;
     }
+
+    pub fn cycle_dex_filter(&mut self) {
+        self.dex_filter = self.dex_filter.next();
+        self.apply_filters();
+    }
+
+    pub fn toggle_watchlist_only(&mut self) {
+        self.watchlist_only = !self.watchlist_only;
+        self.apply_filters();
+    }
+
+    pub fn selected_in_watchlist(&self) -> bool {
+        self.selected_pair_key()
+            .map(|key| self.watchlist.contains(&key))
+            .unwrap_or(false)
+    }
+
+    pub fn toggle_selected_watchlist(&mut self) {
+        let Some(pair_key) = self.selected_pair_key() else {
+            self.status_message = String::from("Tidak ada pair terpilih untuk watchlist.");
+            return;
+        };
+
+        let added = if self.watchlist.contains(&pair_key) {
+            self.watchlist.remove(&pair_key);
+            false
+        } else {
+            self.watchlist.insert(pair_key);
+            true
+        };
+
+        if let Err(err) = save_watchlist(&self.watchlist) {
+            self.status_message = format!("Gagal simpan watchlist: {err}");
+        } else if added {
+            self.status_message = String::from("Pair ditambahkan ke watchlist.");
+        } else {
+            self.status_message = String::from("Pair dihapus dari watchlist.");
+        }
+
+        self.apply_filters();
+    }
+
+    fn selected_pair_key(&self) -> Option<String> {
+        self.filtered_pairs
+            .get(self.selected_index)
+            .and_then(|&idx| self.pairs.get(idx))
+            .map(pair_watch_key)
+    }
 }
 
 fn parse_usd(s: &Option<String>) -> f64 {
@@ -498,6 +621,147 @@ fn is_known_quote_symbol(pair: &PairData) -> bool {
     KNOWN_QUOTES.iter().any(|known| known == &quote)
 }
 
+fn pair_watch_key(pair: &PairData) -> String {
+    pair.pair_address
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .or_else(|| pair.url.as_ref().filter(|v| !v.is_empty()).cloned())
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}:{}",
+                pair.chain_id,
+                pair.dex_id,
+                pair.base_token.symbol.as_deref().unwrap_or(""),
+                pair.quote_token.symbol.as_deref().unwrap_or("")
+            )
+        })
+}
+
+fn watchlist_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    let mut path = PathBuf::from(home);
+    path.push(".haliim_terminal_watchlist.json");
+    Some(path)
+}
+
+fn load_watchlist() -> HashSet<String> {
+    let Some(path) = watchlist_path() else {
+        return HashSet::new();
+    };
+
+    let Ok(raw) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+
+    serde_json::from_str::<WatchlistStore>(&raw)
+        .map(|store| store.pairs.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn save_watchlist(watchlist: &HashSet<String>) -> Result<(), String> {
+    let Some(path) = watchlist_path() else {
+        return Err(String::from("HOME tidak tersedia"));
+    };
+
+    let mut pairs = watchlist.iter().cloned().collect::<Vec<_>>();
+    pairs.sort();
+    let store = WatchlistStore { pairs };
+    let json = serde_json::to_string_pretty(&store)
+        .map_err(|err| format!("serialize watchlist gagal: {err}"))?;
+    fs::write(path, json).map_err(|err| format!("write watchlist gagal: {err}"))
+}
+
+fn classify_health(score: i32) -> &'static str {
+    if score >= 72 {
+        "Strong"
+    } else if score >= 55 {
+        "Moderate"
+    } else {
+        "Weak"
+    }
+}
+
+fn build_health_bar(score: i32) -> String {
+    let filled = (score / 10).clamp(0, 10) as usize;
+    let empty = 10usize.saturating_sub(filled);
+    let gauge = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+    format!("{gauge} {score}/100 ({})", classify_health(score))
+}
+
+fn estimate_il_from_price_change(change_pct: f64) -> Option<f64> {
+    let ratio = 1.0 + (change_pct / 100.0);
+    if ratio <= 0.0 {
+        return None;
+    }
+
+    // Impermanent loss untuk pool 50/50.
+    let il = (2.0 * ratio.sqrt() / (1.0 + ratio)) - 1.0;
+    Some(il * 100.0)
+}
+
+fn microstructure_summary(pair: &PairData, notes: &mut Vec<String>, score: &mut i32) -> String {
+    let vol_h24 = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+    let vol_h6 = pair.volume.as_ref().and_then(|v| v.h6).unwrap_or(0.0);
+    let vol_h1 = pair.volume.as_ref().and_then(|v| v.h1).unwrap_or(0.0);
+    let vol_m5 = pair.volume.as_ref().and_then(|v| v.m5).unwrap_or(0.0);
+    let ch_h6 = pair.price_change.as_ref().and_then(|c| c.h6).unwrap_or(0.0);
+    let ch_h1 = pair.price_change.as_ref().and_then(|c| c.h1).unwrap_or(0.0);
+    let ch_m5 = pair.price_change.as_ref().and_then(|c| c.m5).unwrap_or(0.0);
+
+    let mut tags = Vec::new();
+
+    if vol_h6 > 0.0 {
+        let baseline_h1 = vol_h6 / 6.0;
+        if vol_h1 > baseline_h1 * 1.8 {
+            if ch_h6 >= 0.0 && ch_h1 >= 0.0 {
+                *score += 8;
+                notes.push("Microstructure: volume surge 1h mendukung trend naik h6.".to_string());
+                tags.push("volume surge bullish");
+            } else if ch_h6 < 0.0 {
+                *score -= 6;
+                notes.push("Microstructure: volume surge terjadi saat trend h6 turun.".to_string());
+                tags.push("capitulation risk");
+            } else {
+                *score -= 2;
+                notes.push(
+                    "Microstructure: volume surge tanpa konfirmasi arah, perlu validasi."
+                        .to_string(),
+                );
+                tags.push("surge without direction");
+            }
+        }
+    }
+
+    if ch_h6 >= 8.0 && ch_h1 > 0.0 {
+        *score += 6;
+        notes.push("Trend h6 bullish dan h1 ikut naik.".to_string());
+        tags.push("h6 uptrend continuation");
+    } else if ch_h6 <= -8.0 && ch_h1 < 0.0 {
+        *score -= 10;
+        notes.push("Trend h6 bearish berlanjut sampai h1.".to_string());
+        tags.push("h6 bearish continuation");
+    }
+
+    if vol_h24 > 0.0 && vol_h6 > (vol_h24 / 4.0) * 1.5 {
+        *score += 3;
+        notes.push("Partisipasi volume 6h lebih tinggi dari rerata 24h.".to_string());
+        tags.push("active 6h participation");
+    }
+
+    if vol_h1 > 0.0 && vol_m5 > (vol_h1 / 12.0) * 2.2 && ch_m5 < 0.0 {
+        *score -= 5;
+        notes.push("Volume 5m agresif disertai candle turun, potensi distribusi.".to_string());
+        tags.push("short-term sell burst");
+    }
+
+    if tags.is_empty() {
+        "Struktur orderflow netral; belum ada anomali volume yang kuat.".to_string()
+    } else {
+        format!("Microstructure: {}.", tags.join(", "))
+    }
+}
+
 pub fn assess_pair(pair: &PairData) -> PairAssessment {
     let change_24h = pair
         .price_change
@@ -622,6 +886,9 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         }
     }
 
+    let microstructure = microstructure_summary(pair, &mut notes, &mut score);
+    let il_estimate_24h_pct = estimate_il_from_price_change(change_24h);
+
     score = score.clamp(0, 100);
 
     let signal = if score >= SCORE_GOOD_ENTRY_MIN {
@@ -640,6 +907,9 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         signal,
         score,
         bias_summary,
+        microstructure_summary: microstructure,
+        il_estimate_24h_pct,
+        health_bar: build_health_bar(score),
         notes,
     }
 }
@@ -737,6 +1007,39 @@ mod tests {
         assert_eq!(app.filtered_pairs.len(), 1);
         let selected = app.selected_pair().expect("pair should exist");
         assert_eq!(selected.base_token.symbol.as_deref(), Some("HIGH"));
+    }
+
+    #[test]
+    fn apply_filters_respects_dex_filter() {
+        let mut app = App::new();
+        let mut ray = sample_pair("RAY", 50_000.0, 50_000.0);
+        ray.dex_id = "raydium".to_string();
+        let mut met = sample_pair("MET", 50_000.0, 50_000.0);
+        met.dex_id = "meteora".to_string();
+        app.update_pairs(vec![ray, met]);
+
+        app.dex_filter = DexFilter::Meteora;
+        app.apply_filters();
+
+        assert_eq!(app.filtered_pairs.len(), 1);
+        let selected = app.selected_pair().expect("pair should exist");
+        assert_eq!(selected.base_token.symbol.as_deref(), Some("MET"));
+    }
+
+    #[test]
+    fn watchlist_only_filters_non_watchlisted_pairs() {
+        let mut app = App::new();
+        let pair_a = sample_pair("AAA", 50_000.0, 50_000.0);
+        let pair_b = sample_pair("BBB", 50_000.0, 50_000.0);
+        app.update_pairs(vec![pair_a.clone(), pair_b.clone()]);
+
+        app.watchlist_only = true;
+        app.watchlist.insert(pair_watch_key(&pair_b));
+        app.apply_filters();
+
+        assert_eq!(app.filtered_pairs.len(), 1);
+        let selected = app.selected_pair().expect("pair should exist");
+        assert_eq!(selected.base_token.symbol.as_deref(), Some("BBB"));
     }
 
     #[test]
@@ -902,5 +1205,34 @@ mod tests {
             .notes
             .iter()
             .any(|x| x.contains("Quote token di luar whitelist")));
+    }
+
+    #[test]
+    fn estimate_il_from_price_change_is_negative_for_large_move() {
+        let il = estimate_il_from_price_change(100.0).expect("IL should exist");
+        assert!(il < 0.0);
+        assert!(il.abs() > 5.0);
+    }
+
+    #[test]
+    fn assess_pair_populates_microstructure_and_health_bar() {
+        let mut pair = sample_pair("SURGE", 1_200_000.0, 200_000.0);
+        pair.volume = Some(VolumeData {
+            h24: Some(1_200_000.0),
+            h6: Some(180_000.0),
+            h1: Some(90_000.0),
+            m5: Some(20_000.0),
+        });
+        if let Some(change) = pair.price_change.as_mut() {
+            change.h6 = Some(14.0);
+            change.h1 = Some(3.0);
+            change.m5 = Some(1.2);
+            change.h24 = Some(18.0);
+        }
+
+        let assessed = assess_pair(&pair);
+        assert!(assessed.microstructure_summary.contains("Microstructure"));
+        assert!(assessed.health_bar.contains("/100"));
+        assert!(assessed.il_estimate_24h_pct.is_some());
     }
 }
