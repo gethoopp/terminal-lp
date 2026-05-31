@@ -1,5 +1,6 @@
 use crate::api::PairData;
 use chrono::Local;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SortColumn {
@@ -369,6 +370,16 @@ const VOL_LIQ_RATIO_HEALTHY_MAX: f64 = 8.0;
 const VOL_LIQ_RATIO_OVERHEATED_MIN: f64 = 15.0;
 const PRESSURE_DOMINANCE_RATIO: f64 = 1.2;
 const PRESSURE_MIN_CONFIDENCE_TXNS: f64 = 15.0;
+const AGE_HOURS_VERY_NEW: f64 = 1.0;
+const AGE_HOURS_NEW: f64 = 6.0;
+const AGE_HOURS_YOUNG: f64 = 24.0;
+const AGE_HOURS_EARLY: f64 = 7.0 * 24.0;
+const AGE_PENALTY_VERY_NEW: i32 = 25;
+const AGE_PENALTY_NEW: i32 = 15;
+const AGE_PENALTY_YOUNG: i32 = 8;
+const AGE_PENALTY_EARLY: i32 = 3;
+const QUOTE_RISK_PENALTY: i32 = 4;
+const KNOWN_QUOTES: [&str; 3] = ["USDC", "USDT", "SOL"];
 
 fn symbol_or_unknown(symbol: Option<&str>) -> &str {
     symbol.unwrap_or("UNKNOWN")
@@ -421,19 +432,42 @@ fn pressure_bias_summary(pair: &PairData) -> String {
 
     if sells > buys * PRESSURE_DOMINANCE_RATIO {
         return format!(
-            "Tekanan jual dominan (buy {buys:.1} vs sell {sells:.1}) -> bias pilih {base_symbol}. Contoh RAY/SOL: cenderung pilih RAY."
+            "Tekanan jual dominan (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol} -> bias pilih {base_symbol} (strategi entry saat diskon)."
         );
     }
 
     if buys > sells * PRESSURE_DOMINANCE_RATIO {
         return format!(
-            "Tekanan beli dominan (buy {buys:.1} vs sell {sells:.1}) -> bias pilih {quote_symbol}. Contoh RAY/SOL: cenderung pilih SOL."
+            "Tekanan beli dominan (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol} -> bias pilih {quote_symbol} (strategi take profit ke aset quote)."
         );
     }
 
     format!(
         "Tekanan beli/jual relatif seimbang (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol}."
     )
+}
+
+fn pair_age_hours(pair: &PairData) -> Option<f64> {
+    let created_at_ms = pair.pair_created_at?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if created_at_ms >= now_ms {
+        return Some(0.0);
+    }
+    let age_ms = now_ms.saturating_sub(created_at_ms);
+    Some(age_ms as f64 / 3_600_000.0)
+}
+
+fn is_known_quote_symbol(pair: &PairData) -> bool {
+    let quote = pair
+        .quote_token
+        .symbol
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    KNOWN_QUOTES.iter().any(|known| known == &quote)
 }
 
 pub fn assess_pair(pair: &PairData) -> PairAssessment {
@@ -521,6 +555,32 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
     } else if vol_liq_ratio > VOL_LIQ_RATIO_OVERHEATED_MIN {
         score -= 10;
         notes.push("Volume terlalu agresif vs likuiditas, rawan volatilitas ekstrem.".to_string());
+    }
+
+    if let Some(age_hours) = pair_age_hours(pair) {
+        if age_hours < AGE_HOURS_VERY_NEW {
+            score -= AGE_PENALTY_VERY_NEW;
+            notes.push(
+                "Pair sangat baru (<1 jam), risiko rug/manipulasi sangat tinggi.".to_string(),
+            );
+        } else if age_hours < AGE_HOURS_NEW {
+            score -= AGE_PENALTY_NEW;
+            notes.push("Pair baru (<6 jam), sebaiknya sangat konservatif.".to_string());
+        } else if age_hours < AGE_HOURS_YOUNG {
+            score -= AGE_PENALTY_YOUNG;
+            notes.push("Pair masih muda (<24 jam), butuh konfirmasi tambahan.".to_string());
+        } else if age_hours < AGE_HOURS_EARLY {
+            score -= AGE_PENALTY_EARLY;
+            notes.push("Pair belum matang (<7 hari), sizing sebaiknya kecil.".to_string());
+        }
+    }
+
+    if !is_known_quote_symbol(pair) {
+        score -= QUOTE_RISK_PENALTY;
+        notes.push(
+            "Quote token di luar whitelist (USDC/USDT/SOL), verifikasi manual disarankan."
+                .to_string(),
+        );
     }
 
     if let Some((buys, sells)) = weighted_pressure(pair) {
@@ -755,5 +815,34 @@ mod tests {
 
         let assessed = assess_pair(&pair);
         assert!(assessed.bias_summary.contains("bias pilih SOL"));
+    }
+
+    #[test]
+    fn assess_pair_penalizes_very_new_pair_age() {
+        let mut pair = sample_pair("NEW", 700_000.0, 250_000.0);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be valid")
+            .as_millis() as u64;
+        pair.pair_created_at = Some(now_ms.saturating_sub(30 * 60 * 1000)); // 30 min old
+
+        let assessed = assess_pair(&pair);
+        assert!(assessed
+            .notes
+            .iter()
+            .any(|x| x.contains("Pair sangat baru")));
+        assert!(assessed.score < 67);
+    }
+
+    #[test]
+    fn assess_pair_flags_unknown_quote_token() {
+        let mut pair = sample_pair("AAA", 400_000.0, 120_000.0);
+        pair.quote_token.symbol = Some("XYZ".to_string());
+
+        let assessed = assess_pair(&pair);
+        assert!(assessed
+            .notes
+            .iter()
+            .any(|x| x.contains("Quote token di luar whitelist")));
     }
 }
