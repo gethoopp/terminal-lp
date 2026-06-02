@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod logger;
+mod rsi;
 mod ui;
 
 use app::{App, BotCloseInput, BotOpenInput, BotPosition};

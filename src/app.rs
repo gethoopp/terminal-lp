@@ -1,5 +1,6 @@
 use crate::api::PairData;
 use crate::config;
+use crate::rsi::{RsiInfo};
 use chrono::Local;
 use csv::Writer;
 use serde::{Deserialize, Serialize};
@@ -137,6 +138,7 @@ pub struct PairAssessment {
     pub il_estimate_24h_pct: Option<f64>,
     pub health_bar: String,
     pub notes: Vec<String>,
+    pub rsi: Option<RsiInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1302,6 +1304,8 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         notes.push("Data belum cukup untuk sinyal kuat.".to_string());
     }
 
+    let rsi = pair.price_change.as_ref().and_then(RsiInfo::from_price_change);
+
     PairAssessment {
         signal,
         score,
@@ -1310,6 +1314,7 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         il_estimate_24h_pct,
         health_bar: build_health_bar(score),
         notes,
+        rsi,
     }
 }
 

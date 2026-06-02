@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),     // table
-            Constraint::Length(12), // analysis
+            Constraint::Length(13), // analysis
         ])
         .split(main_layout[1]);
 
@@ -361,6 +361,16 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled("IL Est. 24h: ", Style::default().fg(Color::Cyan)),
                 Span::raw(il_estimate),
+            ]),
+            Line::from(vec![
+                Span::styled("RSI: ", Style::default().fg(Color::Cyan)),
+                Span::raw(
+                    assessment
+                        .as_ref()
+                        .and_then(|a| a.rsi.as_ref())
+                        .map(|r| r.display())
+                        .unwrap_or_else(|| "Data tidak cukup".to_string()),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
