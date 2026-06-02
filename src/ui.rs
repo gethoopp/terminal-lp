@@ -112,6 +112,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(9),  // symbol
         Constraint::Length(12), // price
         Constraint::Length(8),  // 1h %
+        Constraint::Length(7),  // RSI
         Constraint::Length(9),  // 24h %
         Constraint::Length(12), // volume
         Constraint::Length(12), // liquidity
@@ -147,6 +148,7 @@ fn build_header(app: &App) -> Row<'static> {
     let symbol_marker = sort_marker(SortColumn::Symbol);
     let price_marker = sort_marker(SortColumn::Price);
     let ch1h_marker = sort_marker(SortColumn::Change1h);
+    let rsi_marker = sort_marker(SortColumn::Rsi);
     let ch24h_marker = sort_marker(SortColumn::Change24h);
     let vol_marker = sort_marker(SortColumn::Volume24h);
     let liq_marker = sort_marker(SortColumn::Liquidity);
@@ -158,6 +160,7 @@ fn build_header(app: &App) -> Row<'static> {
         Cell::from(format!("Symbol{symbol_marker}")),
         Cell::from(format!("Price{price_marker}")),
         Cell::from(format!("1h%{ch1h_marker}")),
+        Cell::from(format!("RSI*{rsi_marker}")),
         Cell::from(format!("24h%{ch24h_marker}")),
         Cell::from(format!("Vol 24h{vol_marker}")),
         Cell::from(format!("Liquidity{liq_marker}")),
@@ -188,16 +191,17 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
             let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
             let mcap = pair.market_cap.unwrap_or(0.0);
             let fdv = pair.fdv.unwrap_or(0.0);
-            let (signal_label, signal_kind) = app
+            let (signal_label, signal_kind, rsi_value) = app
                 .assessment_for_pair_index(idx)
-                .map(|a| (a.signal.label(), a.signal))
-                .unwrap_or(("PANTAU", TradeSignal::Watchlist));
+                .map(|a| (a.signal.label(), a.signal, a.rsi.as_ref().map(|r| r.value)))
+                .unwrap_or(("PANTAU", TradeSignal::Watchlist, None));
 
             Row::new(vec![
                 Cell::from(symbol.to_uppercase())
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 Cell::from(price),
                 Cell::from(change_cell(change_1h)),
+                Cell::from(rsi_cell(rsi_value)),
                 Cell::from(change_cell(change_24h)),
                 Cell::from(format_usd(volume)),
                 Cell::from(format_usd(liquidity)),
@@ -239,6 +243,26 @@ fn change_cell(value: f64) -> Text<'static> {
     };
 
     Text::from(Span::styled(format!("{arrow} {value:>6.2}%"), style))
+}
+
+fn rsi_cell(value: Option<f64>) -> Text<'static> {
+    match value {
+        Some(rsi) => {
+            let style = if rsi >= 70.0 {
+                Style::default().fg(Color::Red)
+            } else if rsi >= 58.0 {
+                Style::default().fg(Color::Green)
+            } else if rsi >= 45.0 {
+                Style::default().fg(Color::Yellow)
+            } else if rsi >= 35.0 {
+                Style::default().fg(Color::LightYellow)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            Text::from(Span::styled(format!("{rsi:>5.1}"), style))
+        }
+        None => Text::from(Span::styled("  -- ", Style::default().fg(Color::DarkGray))),
+    }
 }
 
 fn format_price(price: &Option<String>) -> String {
@@ -294,6 +318,11 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .as_ref()
             .map(|a| a.bias_summary.as_str())
             .unwrap_or("Data bias pair belum tersedia.");
+        let rsi_summary = assessment
+            .as_ref()
+            .and_then(|a| a.rsi.as_ref())
+            .map(|r| r.display())
+            .unwrap_or_else(|| "Data tidak cukup".to_string());
         let microstructure_summary = assessment
             .as_ref()
             .map(|a| a.microstructure_summary.as_str())
@@ -359,6 +388,10 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw(health_bar.to_string()),
             ]),
             Line::from(vec![
+                Span::styled("RSI*: ", Style::default().fg(Color::Cyan)),
+                Span::raw(rsi_summary),
+            ]),
+            Line::from(vec![
                 Span::styled("IL Est. 24h: ", Style::default().fg(Color::Cyan)),
                 Span::raw(il_estimate),
             ]),
@@ -398,6 +431,10 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
         if hidden_count > 0 {
             lines.push(Line::from(format!("... +{hidden_count} catatan lainnya")));
         }
+        lines.push(Line::from(Span::styled(
+            "*RSI memakai heuristik m5/h1/h6/h24, bukan candle RSI 14 penuh.",
+            Style::default().fg(Color::DarkGray),
+        )));
         lines.push(Line::from(Span::styled(
             "Heuristik teknikal, bukan financial advice.",
             Style::default().fg(Color::DarkGray),
@@ -580,6 +617,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Symbol        Token ticker"),
         Line::from("  Price         Current price in USD"),
         Line::from("  1h %          1-hour price change (▲ green / ▼ red)"),
+        Line::from("  RSI*          RSI heuristik dari m5/h1/h6/h24 untuk arah entry"),
         Line::from("  24h %         24-hour price change"),
         Line::from("  Vol 24h       24-hour volume in USD"),
         Line::from("  Liquidity     Total liquidity in USD"),

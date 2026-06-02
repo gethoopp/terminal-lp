@@ -1,5 +1,6 @@
 use crate::api::PairData;
 use crate::config;
+use crate::rsi::RsiInfo;
 use chrono::Local;
 use csv::Writer;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub enum SortColumn {
     Price,
     Change24h,
     Change1h,
+    Rsi,
     Volume24h,
     Liquidity,
     MarketCap,
@@ -28,7 +30,8 @@ impl SortColumn {
             SortColumn::Symbol => SortColumn::Price,
             SortColumn::Price => SortColumn::Change24h,
             SortColumn::Change24h => SortColumn::Change1h,
-            SortColumn::Change1h => SortColumn::Volume24h,
+            SortColumn::Change1h => SortColumn::Rsi,
+            SortColumn::Rsi => SortColumn::Volume24h,
             SortColumn::Volume24h => SortColumn::Liquidity,
             SortColumn::Liquidity => SortColumn::MarketCap,
             SortColumn::MarketCap => SortColumn::Fdv,
@@ -44,7 +47,8 @@ impl SortColumn {
             SortColumn::Price => SortColumn::Symbol,
             SortColumn::Change24h => SortColumn::Price,
             SortColumn::Change1h => SortColumn::Change24h,
-            SortColumn::Volume24h => SortColumn::Change1h,
+            SortColumn::Rsi => SortColumn::Change1h,
+            SortColumn::Volume24h => SortColumn::Rsi,
             SortColumn::Liquidity => SortColumn::Volume24h,
             SortColumn::MarketCap => SortColumn::Liquidity,
             SortColumn::Fdv => SortColumn::MarketCap,
@@ -137,6 +141,7 @@ pub struct PairAssessment {
     pub il_estimate_24h_pct: Option<f64>,
     pub health_bar: String,
     pub notes: Vec<String>,
+    pub rsi: Option<RsiInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +403,21 @@ impl App {
                     let ch_a = pa.price_change.as_ref().and_then(|pc| pc.h1).unwrap_or(0.0);
                     let ch_b = pb.price_change.as_ref().and_then(|pc| pc.h1).unwrap_or(0.0);
                     ch_a.partial_cmp(&ch_b).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortColumn::Rsi => {
+                    let rsi_a = self
+                        .assessments
+                        .get(a)
+                        .and_then(|x| x.rsi.as_ref().map(|r| r.value))
+                        .unwrap_or(0.0);
+                    let rsi_b = self
+                        .assessments
+                        .get(b)
+                        .and_then(|x| x.rsi.as_ref().map(|r| r.value))
+                        .unwrap_or(0.0);
+                    rsi_a
+                        .partial_cmp(&rsi_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 }
                 SortColumn::Volume24h => {
                     let vol_a = pa.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
@@ -749,6 +769,8 @@ impl App {
                 "price_usd",
                 "change_1h_pct",
                 "change_24h_pct",
+                "rsi_value",
+                "rsi_zone",
                 "volume_24h_usd",
                 "liquidity_usd",
                 "market_cap",
@@ -775,6 +797,12 @@ impl App {
             let micro = assessment
                 .map(|a| a.microstructure_summary.clone())
                 .unwrap_or_else(|| "-".to_string());
+            let rsi = assessment
+                .and_then(|a| a.rsi.as_ref().map(|r| r.value))
+                .unwrap_or(0.0);
+            let rsi_zone = assessment
+                .and_then(|a| a.rsi.as_ref().map(|r| r.zone.label().to_string()))
+                .unwrap_or_else(|| "-".to_string());
 
             writer
                 .write_record([
@@ -796,6 +824,8 @@ impl App {
                             .and_then(|pc| pc.h24)
                             .unwrap_or_default()
                     ),
+                    &format!("{rsi:.2}"),
+                    &rsi_zone,
                     &format!(
                         "{:.4}",
                         pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0)
@@ -1187,6 +1217,10 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
 
     let mut score = SCORE_BASELINE;
     let mut notes = Vec::new();
+    let rsi = pair
+        .price_change
+        .as_ref()
+        .and_then(RsiInfo::from_price_change);
     let bias_summary = pressure_bias_summary(pair);
 
     if liquidity >= LIQUIDITY_STRONG_USD {
@@ -1246,6 +1280,52 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
     } else if vol_liq_ratio > VOL_LIQ_RATIO_OVERHEATED_MIN {
         score -= 10;
         notes.push("Volume terlalu agresif vs likuiditas, rawan volatilitas ekstrem.".to_string());
+    }
+
+    if let Some(rsi_info) = rsi.as_ref() {
+        if rsi_info.value >= 72.0 {
+            if change_1h < 0.0 || change_5m < 0.0 {
+                score -= 10;
+                notes.push(
+                    "RSI heuristik terlalu panas dan momentum jangka pendek mulai melemah."
+                        .to_string(),
+                );
+            } else {
+                score -= 5;
+                notes.push(
+                    "RSI heuristik tinggi, entry baru sebaiknya menunggu pullback.".to_string(),
+                );
+            }
+        } else if (58.0..=68.0).contains(&rsi_info.value) && change_24h >= 0.0 && change_1h >= 0.0 {
+            score += 6;
+            notes.push(
+                "RSI heuristik sehat di area bullish, momentum masih cukup terjaga.".to_string(),
+            );
+        } else if rsi_info.value <= 35.0 {
+            if change_1h > 0.0 || change_5m > 0.0 {
+                score += 4;
+                notes.push(
+                    "RSI heuristik oversold tapi mulai ada rebound, cocok untuk pantau entry bertahap."
+                        .to_string(),
+                );
+            } else {
+                score -= 8;
+                notes.push(
+                    "RSI heuristik oversold tanpa rebound, risiko catching a falling knife."
+                        .to_string(),
+                );
+            }
+        } else if (45.0..58.0).contains(&rsi_info.value) {
+            notes.push(
+                "RSI heuristik netral, konfirmasi arah tetap perlu dilihat dari volume dan orderflow."
+                    .to_string(),
+            );
+        }
+    } else {
+        notes.push(
+            "RSI heuristik belum tersedia karena data perubahan multi-timeframe tidak lengkap."
+                .to_string(),
+        );
     }
 
     if let Some(age_hours) = pair_age_hours(pair) {
@@ -1310,6 +1390,7 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         il_estimate_24h_pct,
         health_bar: build_health_bar(score),
         notes,
+        rsi,
     }
 }
 
@@ -1633,5 +1714,21 @@ mod tests {
         assert!(assessed.microstructure_summary.contains("Microstructure"));
         assert!(assessed.health_bar.contains("/100"));
         assert!(assessed.il_estimate_24h_pct.is_some());
+    }
+
+    #[test]
+    fn assess_pair_populates_rsi_summary() {
+        let mut pair = sample_pair("RSI", 900_000.0, 250_000.0);
+        if let Some(change) = pair.price_change.as_mut() {
+            change.m5 = Some(1.0);
+            change.h1 = Some(4.0);
+            change.h6 = Some(10.0);
+            change.h24 = Some(16.0);
+        }
+
+        let assessed = assess_pair(&pair);
+        let rsi = assessed.rsi.expect("RSI should exist");
+        assert!(rsi.value > 50.0);
+        assert!(rsi.display().contains("Bullish") || rsi.display().contains("Overbought"));
     }
 }
