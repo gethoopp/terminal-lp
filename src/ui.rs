@@ -112,7 +112,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(9),  // symbol
         Constraint::Length(12), // price
         Constraint::Length(8),  // 1h %
-        Constraint::Length(7),  // RSI
+        Constraint::Length(9),  // RSI
         Constraint::Length(9),  // 24h %
         Constraint::Length(12), // volume
         Constraint::Length(12), // liquidity
@@ -432,7 +432,7 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(format!("... +{hidden_count} catatan lainnya")));
         }
         lines.push(Line::from(Span::styled(
-            "*RSI memakai heuristik m5/h1/h6/h24, bukan candle RSI 14 penuh.",
+            "*RSI memakai delta antar-window h24/h6/h1/m5, bukan candle RSI 14 penuh.",
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(Span::styled(
@@ -617,7 +617,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  Symbol        Token ticker"),
         Line::from("  Price         Current price in USD"),
         Line::from("  1h %          1-hour price change (▲ green / ▼ red)"),
-        Line::from("  RSI*          RSI heuristik dari m5/h1/h6/h24 untuk arah entry"),
+        Line::from("  RSI*          RSI heuristik dari delta h24/h6/h1/m5 untuk arah entry LP"),
         Line::from("  24h %         24-hour price change"),
         Line::from("  Vol 24h       24-hour volume in USD"),
         Line::from("  Liquidity     Total liquidity in USD"),

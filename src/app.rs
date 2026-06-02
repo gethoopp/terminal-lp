@@ -797,12 +797,12 @@ impl App {
             let micro = assessment
                 .map(|a| a.microstructure_summary.clone())
                 .unwrap_or_else(|| "-".to_string());
-            let rsi = assessment
-                .and_then(|a| a.rsi.as_ref().map(|r| r.value))
-                .unwrap_or(0.0);
+            let rsi_value = assessment
+                .and_then(|a| a.rsi.as_ref().map(|r| format!("{:.2}", r.value)))
+                .unwrap_or_default();
             let rsi_zone = assessment
                 .and_then(|a| a.rsi.as_ref().map(|r| r.zone.label().to_string()))
-                .unwrap_or_else(|| "-".to_string());
+                .unwrap_or_default();
 
             writer
                 .write_record([
@@ -824,7 +824,7 @@ impl App {
                             .and_then(|pc| pc.h24)
                             .unwrap_or_default()
                     ),
-                    &format!("{rsi:.2}"),
+                    &rsi_value,
                     &rsi_zone,
                     &format!(
                         "{:.4}",
@@ -1285,31 +1285,31 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
     if let Some(rsi_info) = rsi.as_ref() {
         if rsi_info.value >= 72.0 {
             if change_1h < 0.0 || change_5m < 0.0 {
-                score -= 10;
+                score -= 4;
                 notes.push(
                     "RSI heuristik terlalu panas dan momentum jangka pendek mulai melemah."
                         .to_string(),
                 );
             } else {
-                score -= 5;
+                score -= 2;
                 notes.push(
                     "RSI heuristik tinggi, entry baru sebaiknya menunggu pullback.".to_string(),
                 );
             }
         } else if (58.0..=68.0).contains(&rsi_info.value) && change_24h >= 0.0 && change_1h >= 0.0 {
-            score += 6;
+            score += 2;
             notes.push(
                 "RSI heuristik sehat di area bullish, momentum masih cukup terjaga.".to_string(),
             );
         } else if rsi_info.value <= 35.0 {
             if change_1h > 0.0 || change_5m > 0.0 {
-                score += 4;
+                score += 2;
                 notes.push(
                     "RSI heuristik oversold tapi mulai ada rebound, cocok untuk pantau entry bertahap."
                         .to_string(),
                 );
             } else {
-                score -= 8;
+                score -= 3;
                 notes.push(
                     "RSI heuristik oversold tanpa rebound, risiko catching a falling knife."
                         .to_string(),
@@ -1523,6 +1523,23 @@ mod tests {
     }
 
     #[test]
+    fn sort_by_rsi_keeps_pairs_with_missing_rsi_stable() {
+        let mut app = App::new();
+        let mut first = sample_pair("AAA", 50_000.0, 50_000.0);
+        first.price_change = None;
+        let mut second = sample_pair("BBB", 50_000.0, 50_000.0);
+        second.price_change = None;
+        app.update_pairs(vec![first, second]);
+
+        app.sort_column = SortColumn::Rsi;
+        app.sort_direction = SortDirection::Descending;
+        app.apply_filters();
+
+        let selected = app.selected_pair().expect("pair should exist");
+        assert_eq!(selected.base_token.symbol.as_deref(), Some("AAA"));
+    }
+
+    #[test]
     fn selected_fdv_mcap_ratio_returns_expected_value() {
         let mut app = App::new();
         let mut pair = sample_pair("RATIO", 100_000.0, 100_000.0);
@@ -1730,5 +1747,32 @@ mod tests {
         let rsi = assessed.rsi.expect("RSI should exist");
         assert!(rsi.value > 50.0);
         assert!(rsi.display().contains("Bullish") || rsi.display().contains("Overbought"));
+    }
+
+    #[test]
+    fn export_csv_leaves_rsi_blank_when_not_available() {
+        let unique_dir = std::env::temp_dir().join(format!(
+            "volatile_scanner_test_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be valid")
+                .as_nanos()
+        ));
+        let mut app = App::new();
+        let mut pair = sample_pair("NOR", 75_000.0, 75_000.0);
+        pair.price_change = None;
+        app.update_pairs(vec![pair]);
+
+        let csv_path = app
+            .export_filtered_to_csv(&unique_dir)
+            .expect("CSV export should succeed");
+        let csv = fs::read_to_string(csv_path).expect("CSV should be readable");
+        let data_line = csv.lines().nth(1).expect("CSV should contain one data row");
+        let columns: Vec<&str> = data_line.split(',').collect();
+
+        assert_eq!(columns[6], "");
+        assert_eq!(columns[7], "");
+
+        let _ = fs::remove_dir_all(unique_dir);
     }
 }

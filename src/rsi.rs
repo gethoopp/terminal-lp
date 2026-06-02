@@ -1,12 +1,9 @@
 /// RSI per emiten/pair — dihitung dari perubahan harga multi-timeframe.
 ///
 /// Karena API DexScreener tidak menyediakan data OHLCV mentah, RSI dihitung
-/// secara heuristik menggunakan "pseudo-periods" dari data price_change yang
-/// tersedia: m5, h1, h6, h24. Setiap nilai dianggap sebagai perubahan pada
-/// periode tersebut dan membentuk urutan periode singkat yang membentuk RSI.
-///
-/// Urutan periode (dari lama ke baru): h24, h6, h1, m5
-/// Nilai positif = gain, negatif = loss.
+/// secara heuristik menggunakan delta antar-window dari data price_change yang
+/// tersedia: h24-h6, h6-h1, h1-m5. Ini bukan RSI 14-candle penuh, tetapi
+/// setidaknya menangkap perubahan momentum antar-periode secara konseptual.
 use crate::api::PriceChange;
 
 /// Zona RSI dan interpretasinya untuk LP entry.
@@ -37,11 +34,21 @@ impl RsiZone {
 
     pub fn entry_bias(&self) -> &'static str {
         match self {
-            RsiZone::Oversold => "Entry contrarian bisa dipertimbangkan; konfirmasi reversal dulu",
-            RsiZone::RecoveringOversold => "Awal rebound — entry kecil bisa, sizing konservatif",
-            RsiZone::Neutral => "Arah belum jelas, tunggu breakout momentum",
-            RsiZone::Bullish => "Momentum positif, entry LP masih layak",
-            RsiZone::Overbought => "Overbought — hindari entry baru, tunggu koreksi",
+            RsiZone::Oversold => {
+                "Potensi mean reversion menarik, tapi tunggu tekanan jual benar-benar reda"
+            }
+            RsiZone::RecoveringOversold => {
+                "Rebound awal mulai terlihat; LP kecil bertahap lebih aman daripada entry penuh"
+            }
+            RsiZone::Neutral => {
+                "Kondisi paling nyaman untuk LP karena arah lebih seimbang dan IL cenderung lebih rendah"
+            }
+            RsiZone::Bullish => {
+                "Trend naik masih sehat, tetapi LP tetap perlu disiplin range dan sizing"
+            }
+            RsiZone::Overbought => {
+                "Harga jauh dari area mean; LP baru rawan masuk dekat puncak lalu kena IL saat revert"
+            }
         }
     }
 }
@@ -56,21 +63,29 @@ pub struct RsiInfo {
 impl RsiInfo {
     /// Hitung RSI dari data price_change yang tersedia.
     ///
-    /// Menggunakan 4 "period" dari urutan h24 → h6 → h1 → m5,
-    /// di mana setiap periode merepresentasikan perubahan harga pada rentang waktu itu.
-    /// Karena hanya 4 titik, RSI yang dihasilkan adalah estimasi sinyal momentum jangka pendek.
+    /// Menggunakan delta antar window kumulatif: (h24-h6), (h6-h1), (h1-m5).
+    /// Dengan demikian input RSI lebih dekat ke pseudo-return berurutan daripada
+    /// memakai cumulative change mentah yang menyesatkan.
     pub fn from_price_change(pc: &PriceChange) -> Option<Self> {
-        // Kumpulkan perubahan dari periode terpanjang ke terpendek (urutan kronologis)
         let periods: Vec<f64> = [pc.h24, pc.h6, pc.h1, pc.m5]
             .iter()
             .filter_map(|v| *v)
             .collect();
 
-        if periods.len() < 2 {
+        if periods.len() < 3 {
             return None;
         }
 
-        let value = compute_rsi(&periods);
+        let deltas: Vec<f64> = periods
+            .windows(2)
+            .map(|window| window[0] - window[1])
+            .collect();
+
+        if deltas.len() < 2 {
+            return None;
+        }
+
+        let value = compute_rsi(&deltas);
         let zone = classify_rsi(value);
         Some(RsiInfo { value, zone })
     }
@@ -93,14 +108,10 @@ impl RsiInfo {
 }
 
 /// Hitung RSI dari slice perubahan harga (gain/loss).
-/// Menggunakan metode Wilder's Smoothed Moving Average (SMMA).
-/// Minimal 2 periode diperlukan.
+/// Dengan data tipis, hasil dipaksa netral untuk menghindari sinyal palsu.
 pub fn compute_rsi(changes: &[f64]) -> f64 {
-    if changes.is_empty() {
+    if changes.len() < 2 {
         return 50.0;
-    }
-    if changes.len() == 1 {
-        return if changes[0] >= 0.0 { 70.0 } else { 30.0 };
     }
 
     let gains: Vec<f64> = changes
@@ -112,10 +123,12 @@ pub fn compute_rsi(changes: &[f64]) -> f64 {
         .map(|&c| if c < 0.0 { -c } else { 0.0 })
         .collect();
 
-    // Dengan data sangat sedikit, pakai average sederhana (ekuivalen dengan Wilder periode=n)
     let avg_gain: f64 = gains.iter().sum::<f64>() / gains.len() as f64;
     let avg_loss: f64 = losses.iter().sum::<f64>() / losses.len() as f64;
 
+    if avg_gain == 0.0 && avg_loss == 0.0 {
+        return 50.0;
+    }
     if avg_loss == 0.0 {
         return 100.0;
     }
@@ -145,8 +158,6 @@ mod tests {
         PriceChange { m5, h1, h6, h24 }
     }
 
-    // --- compute_rsi ---
-
     #[test]
     fn test_rsi_all_gains_is_100() {
         let rsi = compute_rsi(&[5.0, 10.0, 3.0]);
@@ -161,19 +172,18 @@ mod tests {
 
     #[test]
     fn test_rsi_equal_gain_loss_is_50() {
-        // avg_gain == avg_loss => RS=1 => RSI = 100 - 100/(1+1) = 50
         let rsi = compute_rsi(&[5.0, -5.0]);
         assert!((rsi - 50.0).abs() < 1e-6, "expected ~50.0, got {rsi}");
     }
 
     #[test]
-    fn test_rsi_single_positive() {
-        assert_eq!(compute_rsi(&[3.0]), 70.0);
+    fn test_rsi_single_positive_returns_neutral_when_data_too_thin() {
+        assert_eq!(compute_rsi(&[3.0]), 50.0);
     }
 
     #[test]
-    fn test_rsi_single_negative() {
-        assert_eq!(compute_rsi(&[-3.0]), 30.0);
+    fn test_rsi_single_negative_returns_neutral_when_data_too_thin() {
+        assert_eq!(compute_rsi(&[-3.0]), 50.0);
     }
 
     #[test]
@@ -182,12 +192,15 @@ mod tests {
     }
 
     #[test]
+    fn test_rsi_all_zero_returns_neutral() {
+        assert_eq!(compute_rsi(&[0.0, 0.0, 0.0]), 50.0);
+    }
+
+    #[test]
     fn test_rsi_clamp_within_0_100() {
         let rsi = compute_rsi(&[100.0, 100.0, 100.0]);
         assert!((0.0..=100.0).contains(&rsi));
     }
-
-    // --- classify_rsi ---
 
     #[test]
     fn test_classify_oversold() {
@@ -216,11 +229,8 @@ mod tests {
         assert_eq!(classify_rsi(100.0), RsiZone::Overbought);
     }
 
-    // --- RsiInfo::from_price_change ---
-
     #[test]
     fn test_from_price_change_full_data() {
-        // All positive => overbought
         let rsi = RsiInfo::from_price_change(&pc(Some(2.0), Some(5.0), Some(8.0), Some(10.0)));
         let info = rsi.expect("should produce RSI");
         assert_eq!(info.value, 100.0);
@@ -237,32 +247,24 @@ mod tests {
 
     #[test]
     fn test_from_price_change_missing_data_returns_none() {
-        // Only 1 data point
         let rsi = RsiInfo::from_price_change(&pc(None, None, None, Some(5.0)));
         assert!(rsi.is_none());
     }
 
     #[test]
     fn test_from_price_change_partial_data() {
-        // m5=None, h1=None, h6=-5.0, h24=5.0 => 2 periods, equal gain/loss => ~50
-        let rsi = RsiInfo::from_price_change(&pc(None, None, Some(-5.0), Some(5.0)));
+        let rsi = RsiInfo::from_price_change(&pc(None, Some(1.0), Some(4.0), Some(7.0)));
         let info = rsi.expect("should produce RSI");
-        assert!(
-            (info.value - 50.0).abs() < 1e-6,
-            "expected ~50, got {}",
-            info.value
-        );
-        assert_eq!(info.zone, RsiZone::Neutral);
+        assert_eq!(info.value, 100.0);
+        assert_eq!(info.zone, RsiZone::Overbought);
     }
 
     #[test]
-    fn test_from_price_change_mixed_produces_correct_zone() {
-        // Predominantly positive (3 gain, 1 loss)
-        let rsi = RsiInfo::from_price_change(&pc(Some(1.0), Some(3.0), Some(2.0), Some(-5.0)));
+    fn test_from_price_change_uses_delta_not_raw_cumulative_values() {
+        let rsi = RsiInfo::from_price_change(&pc(Some(25.0), Some(24.0), Some(22.0), Some(20.0)));
         let info = rsi.expect("should produce RSI");
-        // avg_gain = (1+3+2)/4 = 1.5, avg_loss = 5/4 = 1.25, RS=1.2 => RSI~54.5
-        assert!(info.value > 50.0 && info.value < 70.0);
-        assert!(matches!(info.zone, RsiZone::Neutral | RsiZone::Bullish));
+        assert_eq!(info.value, 0.0);
+        assert_eq!(info.zone, RsiZone::Oversold);
     }
 
     #[test]
@@ -285,20 +287,25 @@ mod tests {
         assert_eq!(info.short_display(), "50.0 (Netral)");
     }
 
-    // --- entry_bias correctness ---
+    #[test]
+    fn test_entry_bias_oversold_suggests_mean_reversion() {
+        let bias = RsiZone::Oversold.entry_bias();
+        assert!(bias.to_lowercase().contains("mean") || bias.to_lowercase().contains("jual"));
+    }
 
     #[test]
-    fn test_entry_bias_oversold_suggests_contrarian() {
-        let bias = RsiZone::Oversold.entry_bias();
+    fn test_entry_bias_overbought_mentions_il_or_revert() {
+        let bias = RsiZone::Overbought.entry_bias();
         assert!(
-            bias.to_lowercase().contains("contrarian")
-                || bias.to_lowercase().contains("konfirmasi")
+            bias.to_lowercase().contains("il")
+                || bias.to_lowercase().contains("mean")
+                || bias.to_lowercase().contains("revert")
         );
     }
 
     #[test]
-    fn test_entry_bias_overbought_suggests_avoid() {
-        let bias = RsiZone::Overbought.entry_bias();
-        assert!(bias.to_lowercase().contains("hindari") || bias.to_lowercase().contains("koreksi"));
+    fn test_entry_bias_neutral_is_lp_friendly() {
+        let bias = RsiZone::Neutral.entry_bias();
+        assert!(bias.to_lowercase().contains("lp") || bias.to_lowercase().contains("il"));
     }
 }
