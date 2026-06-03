@@ -858,7 +858,7 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
     }
 
     // Footer
-    let hint = Paragraph::new("  P = tutup portfolio | q = quit")
+    let hint = Paragraph::new("  P/Esc = tutup portfolio | e = export CSV | q = quit")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, layout[3]);
 }

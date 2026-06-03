@@ -771,7 +771,7 @@ impl App {
                 position_size_usd: self.bot_position_size_usd,
                 opened_at: pos.opened_at.clone(),
                 closed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                reason: reason.to_string(),
+                reason: reason.chars().take(50).collect(),
             };
             self.trade_history.push(record);
             let _ = append_trade_history(&self.trade_history);
@@ -934,6 +934,37 @@ impl App {
         writer
             .flush()
             .map_err(|err| format!("gagal flush CSV {}: {err}", file_path.display()))?;
+        Ok(file_path)
+    }
+
+    pub fn export_portfolio_to_csv(&self, export_dir: &PathBuf) -> Result<PathBuf, String> {
+        fs::create_dir_all(export_dir)
+            .map_err(|e| format!("gagal membuat export dir: {e}"))?;
+        let filename = format!(
+            "portfolio_{}.csv",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        );
+        let file_path = export_dir.join(filename);
+        let mut writer = Writer::from_path(&file_path)
+            .map_err(|e| format!("gagal buka CSV: {e}"))?;
+        writer
+            .write_record(["closed_at", "symbol", "entry_price", "exit_price", "pnl_pct", "position_size_usd", "opened_at", "reason"])
+            .map_err(|e| format!("gagal tulis header: {e}"))?;
+        for t in &self.trade_history {
+            writer
+                .write_record([
+                    &t.closed_at,
+                    &t.symbol,
+                    &format!("{:.8}", t.entry_price),
+                    &format!("{:.8}", t.exit_price),
+                    &format!("{:.4}", t.pnl_pct),
+                    &format!("{:.2}", t.position_size_usd),
+                    &t.opened_at,
+                    &t.reason,
+                ])
+                .map_err(|e| format!("gagal tulis row: {e}"))?;
+        }
+        writer.flush().map_err(|e| format!("gagal flush: {e}"))?;
         Ok(file_path)
     }
 
@@ -1203,7 +1234,16 @@ fn append_trade_history(history: &[TradeRecord]) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(history)
         .map_err(|e| format!("serialize history failed: {e}"))?;
-    fs::write(&path, json).map_err(|e| format!("write history failed: {e}"))
+    // Atomic write: write to temp file then rename
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &json).map_err(|e| format!("write tmp failed: {e}"))?;
+    // Set permissions to 600 (owner read/write only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp_path, &path).map_err(|e| format!("rename failed: {e}"))
 }
 
 fn classify_health(score: i32) -> &'static str {

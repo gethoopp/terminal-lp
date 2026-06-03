@@ -221,6 +221,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         KeyCode::Char('P') | KeyCode::Char('p') | KeyCode::Esc | KeyCode::Char('q') => {
                             app.toggle_portfolio();
                         }
+                        KeyCode::Char('e') | KeyCode::Char('E') => {
+                            match app.export_portfolio_to_csv(&export_dir) {
+                                Ok(path) => app.set_warning(format!("Portfolio exported: {}", path.display())),
+                                Err(e) => app.set_warning(format!("Export failed: {e}")),
+                            }
+                        }
                         _ => {}
                     }
                     continue;
