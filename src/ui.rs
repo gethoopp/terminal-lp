@@ -88,7 +88,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
 
     if app.filtered_pairs.is_empty() {
         let empty = Paragraph::new(
-            "No pairs match your filters. Try lowering min volume / liquidity or clearing search.",
+            "No pairs match your filters. Try lowering min volume / liquidity / market cap or clearing search.",
         )
         .block(Block::default().borders(Borders::ALL))
         .alignment(Alignment::Center);

@@ -147,7 +147,7 @@ impl Default for AppConfig {
             intro_duration_ms: 2300,
             initial_min_volume_filter: 1000.0,
             initial_min_liquidity_filter: 500.0,
-            initial_min_market_cap_filter: 120_000.0,
+            initial_min_market_cap_filter: 50_000.0,
         }
     }
 }
