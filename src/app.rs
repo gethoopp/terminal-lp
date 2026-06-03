@@ -185,6 +185,19 @@ pub struct BotCloseInput {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeRecord {
+    pub symbol: String,
+    pub pair_key: String,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub pnl_pct: f64,
+    pub position_size_usd: f64,
+    pub opened_at: String,
+    pub closed_at: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct WatchlistStore {
     pairs: Vec<String>,
@@ -228,6 +241,8 @@ pub struct App {
     alerted_pairs: HashMap<String, u64>,
     pub yields: HashMap<String, Vec<YieldInfo>>,
     pub degen_mode: bool,
+    pub trade_history: Vec<TradeRecord>,
+    pub show_portfolio: bool,
 }
 
 impl App {
@@ -284,6 +299,8 @@ impl App {
             alerted_pairs: HashMap::new(),
             yields: HashMap::new(),
             degen_mode: false,
+            trade_history: load_trade_history(),
+            show_portfolio: false,
         }
     }
 
@@ -563,6 +580,10 @@ impl App {
         self.show_help = !self.show_help;
     }
 
+    pub fn toggle_portfolio(&mut self) {
+        self.show_portfolio = !self.show_portfolio;
+    }
+
     pub fn start_search(&mut self) {
         self.search_mode = true;
         self.status_message = String::from("Search mode: type query, Enter to keep, Esc to clear");
@@ -739,6 +760,22 @@ impl App {
     }
 
     pub fn set_bot_closed(&mut self, symbol: &str, current_price: f64, pnl_pct: f64, reason: &str) {
+        // Save to trade history before clearing the position
+        if let Some(pos) = self.bot_active_position.as_ref() {
+            let record = TradeRecord {
+                symbol: symbol.to_string(),
+                pair_key: pos.pair_key.clone(),
+                entry_price: pos.entry_price,
+                exit_price: current_price,
+                pnl_pct,
+                position_size_usd: self.bot_position_size_usd,
+                opened_at: pos.opened_at.clone(),
+                closed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                reason: reason.to_string(),
+            };
+            self.trade_history.push(record);
+            let _ = append_trade_history(&self.trade_history);
+        }
         self.bot_active_position = None;
         if let Err(err) = save_bot_position(None) {
             self.bot_status = format!("BOT CLEAR ERROR: {err}");
@@ -1148,6 +1185,25 @@ fn save_bot_position(position: Option<&BotPosition>) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&store)
         .map_err(|err| format!("serialize bot position gagal: {err}"))?;
     fs::write(path, json).map_err(|err| format!("write bot position gagal: {err}"))
+}
+
+fn load_trade_history() -> Vec<TradeRecord> {
+    let path = config::trade_history_file_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_str::<Vec<TradeRecord>>(&raw).unwrap_or_default()
+}
+
+fn append_trade_history(history: &[TradeRecord]) -> Result<(), String> {
+    let path = config::trade_history_file_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(history)
+        .map_err(|e| format!("serialize history failed: {e}"))?;
+    fs::write(&path, json).map_err(|e| format!("write history failed: {e}"))
 }
 
 fn classify_health(score: i32) -> &'static str {

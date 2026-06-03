@@ -239,6 +239,10 @@ pub fn bot_position_file_path() -> PathBuf {
     app_data_dir().join("bot_position.json")
 }
 
+pub fn trade_history_file_path() -> PathBuf {
+    app_data_dir().join("trade_history.json")
+}
+
 pub fn resolve_path(path_like: &str) -> PathBuf {
     if let Some(rest) = path_like.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {

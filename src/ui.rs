@@ -13,6 +13,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
+    if app.show_portfolio {
+        render_portfolio(frame, app);
+        return;
+    }
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -576,6 +581,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" mcap filter  "),
         Span::styled("h", Style::default().fg(Color::Cyan)),
         Span::raw(" help  "),
+        Span::styled("P", Style::default().fg(Color::Cyan)),
+        Span::raw(" portfolio  "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit"),
     ];
@@ -733,6 +740,127 @@ fn render_help(frame: &mut Frame) {
         .alignment(Alignment::Left);
 
     frame.render_widget(help, frame.area());
+}
+
+fn render_portfolio(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let history = &app.trade_history;
+
+    // Summary stats
+    let total_trades = history.len();
+    let wins = history.iter().filter(|t| t.pnl_pct > 0.0).count();
+    let total_pnl: f64 = history.iter().map(|t| t.pnl_pct).sum();
+    let win_rate = if total_trades > 0 {
+        100.0 * wins as f64 / total_trades as f64
+    } else {
+        0.0
+    };
+    let active_pos = app.bot_active_position.as_ref();
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // header
+            Constraint::Length(5),  // summary
+            Constraint::Min(5),     // trade history table
+            Constraint::Length(2),  // footer hint
+        ])
+        .split(area);
+
+    // Header
+    let header = Paragraph::new(" 📊 Portfolio — HALIIM Terminal")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(header, layout[0]);
+
+    // Summary
+    let active_line = match active_pos {
+        Some(pos) => format!("Active: {} | Entry: ${:.8} | TP: {:.1}% | SL: {:.1}%",
+            pos.symbol, pos.entry_price, pos.take_profit_pct, pos.stop_loss_pct),
+        None => "Active: — (no open position)".to_string(),
+    };
+    let summary_text = vec![
+        Line::from(vec![
+            Span::raw("  Trades: "),
+            Span::styled(total_trades.to_string(), Style::default().fg(Color::Yellow)),
+            Span::raw("  |  Wins: "),
+            Span::styled(wins.to_string(), Style::default().fg(Color::Green)),
+            Span::raw("  |  Win Rate: "),
+            Span::styled(format!("{win_rate:.1}%"), Style::default().fg(Color::Green)),
+            Span::raw("  |  Total PnL: "),
+            Span::styled(
+                format!("{total_pnl:+.2}%"),
+                if total_pnl >= 0.0 {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
+            ),
+        ]),
+        Line::from(Span::raw(format!("  {active_line}"))),
+    ];
+    let summary = Paragraph::new(Text::from(summary_text))
+        .block(Block::default().borders(Borders::ALL).title(" Summary "));
+    frame.render_widget(summary, layout[1]);
+
+    // Trade history table
+    let header_cells = ["Closed At", "Symbol", "Entry", "Exit", "PnL%", "Size USD", "Reason"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+    let table_header = Row::new(header_cells).height(1);
+
+    let rows: Vec<Row> = history.iter().rev().map(|t| {
+        let pnl_style = if t.pnl_pct >= 0.0 {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        Row::new(vec![
+            Cell::from(t.closed_at.clone()),
+            Cell::from(t.symbol.clone()),
+            Cell::from(format!("${:.8}", t.entry_price)),
+            Cell::from(format!("${:.8}", t.exit_price)),
+            Cell::from(format!("{:+.2}%", t.pnl_pct)).style(pnl_style),
+            Cell::from(format!("${:.0}", t.position_size_usd)),
+            Cell::from(t.reason.clone()),
+        ])
+    }).collect();
+
+    let empty_msg = if history.is_empty() {
+        "  Belum ada trade yang tercatat. Trade akan muncul di sini setelah posisi ditutup."
+    } else {
+        ""
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(20),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Min(10),
+        ],
+    )
+    .header(table_header)
+    .block(Block::default().borders(Borders::ALL).title(" Trade History (newest first) "));
+
+    if history.is_empty() {
+        let empty = Paragraph::new(empty_msg)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title(" Trade History "));
+        frame.render_widget(empty, layout[2]);
+    } else {
+        let mut state = TableState::default();
+        frame.render_stateful_widget(table, layout[2], &mut state);
+    }
+
+    // Footer
+    let hint = Paragraph::new("  P = tutup portfolio | q = quit")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, layout[3]);
 }
 
 #[cfg(test)]
