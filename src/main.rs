@@ -24,7 +24,6 @@ use tracing::{error, info, warn};
 
 type FetchMessage = Result<api::FetchResult, String>;
 type BotMessage = Result<BotTaskResult, String>;
-type YieldMessage = Result<HashMap<(String, String), yield_data::YieldInfo>, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 
 enum BotTaskResult {
@@ -282,6 +281,9 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Char('W') => {
                         app.toggle_watchlist_only();
                     }
+                    KeyCode::Char('d') => {
+                        app.toggle_degen_mode();
+                    }
                     KeyCode::Char('b') => app.toggle_bot_enabled(),
                     KeyCode::Char('p') => {
                         if bot_in_flight {
@@ -340,53 +342,6 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     }
 
     Ok(())
-}
-
-fn request_yield_fetch(
-    client: &reqwest::Client,
-    yield_tx: &UnboundedSender<YieldMessage>,
-    yield_in_flight: &mut bool,
-) {
-    if *yield_in_flight {
-        return;
-    }
-    *yield_in_flight = true;
-
-    let tx = yield_tx.clone();
-    let client = client.clone();
-    tokio::spawn(async move {
-        let result = async {
-            let pools = yield_data::fetch_solana_yields(&client).await?;
-            Ok(yield_data::build_yield_index(pools))
-        }
-        .await;
-        let _ = tx.send(result);
-    });
-}
-
-fn drain_yield_results(
-    yield_rx: &mut UnboundedReceiver<YieldMessage>,
-    app: &mut App,
-    yield_in_flight: &mut bool,
-) {
-    loop {
-        match yield_rx.try_recv() {
-            Ok(result) => {
-                *yield_in_flight = false;
-                match result {
-                    Ok(index) => {
-                        info!(pool_count = index.len(), "yield data updated from DefiLlama");
-                        app.update_yields(index);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "yield fetch failed, using cached data");
-                    }
-                }
-            }
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
-        }
-    }
 }
 
 fn request_fetch(
