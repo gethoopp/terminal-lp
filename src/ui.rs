@@ -431,18 +431,48 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("Microstructure: ", Style::default().fg(Color::Cyan)),
                 Span::raw(microstructure_summary.to_string()),
             ]),
-            Line::from(vec![
-                Span::styled("Bot: ", Style::default().fg(Color::Cyan)),
-                Span::raw(app.bot_status.clone()),
-            ]),
         ];
 
-        if let Some(note) = yield_stability {
-            lines.push(Line::from(vec![
-                Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(note, Style::default().fg(Color::DarkGray)),
-            ]));
+        // Yield section
+        if let Some(assessment) = assessment.as_ref() {
+            if !assessment.yields.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("Yield: ", Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        assessment.yields.len().to_string() + " pools tersedia",
+                        Style::default().fg(Color::Green),
+                    ),
+                ]));
+
+                for (idx, y) in assessment.yields.iter().take(3).enumerate() {
+                    let apy_str = y.display_apy();
+                    let dex = y.dex_name.label();
+                    let label = if idx == 0 { "  Best:  " } else { "  Alt:   " };
+                    lines.push(Line::from(vec![
+                        Span::styled(label, Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{apy_str} APY ({dex})")),
+                        Span::raw(if y.il_risk { " | IL Risk" } else { "" }),
+                    ]));
+                }
+
+                if assessment.yields.len() > 3 {
+                    lines.push(Line::from(format!(
+                        "  ... +{} pool lainnya",
+                        assessment.yields.len() - 3
+                    )));
+                }
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("Yield: ", Style::default().fg(Color::Cyan)),
+                    Span::styled("No data", Style::default().fg(Color::DarkGray)),
+                ]));
+            }
         }
+
+        lines.push(Line::from(vec![
+            Span::styled("Bot: ", Style::default().fg(Color::Cyan)),
+            Span::raw(app.bot_status.clone()),
+        ]));
 
         if let Some(position) = app.bot_active_position.as_ref() {
             lines.push(Line::from(vec![
