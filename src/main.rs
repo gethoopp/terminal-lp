@@ -159,13 +159,15 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
 
     // Initial data fetch in background to keep UI responsive.
     request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
-    request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
+    request_yield_fetch(&client, &yield_tx, &mut yield_in_flight, &mut app);
 
     let tick_rate = Duration::from_millis(cfg.app.tick_rate_ms.max(1));
     let refresh_rate = Duration::from_secs(cfg.app.refresh_rate_secs.max(1));
     let bot_check_rate = Duration::from_secs(cfg.app.bot_check_rate_secs.max(1));
+    let yield_refresh_rate = Duration::from_secs(150);
     let mut last_refresh = Instant::now();
     let mut last_bot_check = Instant::now();
+    let mut last_yield_refresh = Instant::now();
 
     loop {
         drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
@@ -179,9 +181,10 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
             last_refresh = Instant::now();
         }
 
-        // Yield refresh (every 5 minutes)
-        if last_refresh.elapsed() >= Duration::from_secs(300) && !yield_in_flight {
-            request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
+        // Yield refresh (every 2.5 minutes for volatile APY tracking)
+        if last_yield_refresh.elapsed() >= yield_refresh_rate && !yield_in_flight {
+            request_yield_fetch(&client, &yield_tx, &mut yield_in_flight, &mut app);
+            last_yield_refresh = Instant::now();
         }
 
         if last_bot_check.elapsed() >= bot_check_rate && !bot_in_flight {
@@ -486,12 +489,14 @@ fn request_yield_fetch(
     client: &reqwest::Client,
     yield_tx: &UnboundedSender<HashMap<String, Vec<yield_mod::YieldInfo>>>,
     yield_in_flight: &mut bool,
+    app: &mut App,
 ) {
     if *yield_in_flight {
         return;
     }
 
     *yield_in_flight = true;
+    app.yields_loading = true;
     let tx = yield_tx.clone();
     let client = client.clone();
     tokio::spawn(async move {
@@ -516,11 +521,13 @@ fn drain_yield_results(
         match yield_rx.try_recv() {
             Ok(yields) => {
                 *yield_in_flight = false;
+                app.yields_loading = false;
                 app.update_yields(yields);
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 *yield_in_flight = false;
+                app.yields_loading = false;
                 break;
             }
         }

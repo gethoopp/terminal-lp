@@ -18,6 +18,7 @@ pub enum SortColumn {
     Change24h,
     Change1h,
     Rsi,
+    Yield,
     Volume24h,
     Liquidity,
     MarketCap,
@@ -33,7 +34,8 @@ impl SortColumn {
             SortColumn::Price => SortColumn::Change24h,
             SortColumn::Change24h => SortColumn::Change1h,
             SortColumn::Change1h => SortColumn::Rsi,
-            SortColumn::Rsi => SortColumn::Volume24h,
+            SortColumn::Rsi => SortColumn::Yield,
+            SortColumn::Yield => SortColumn::Volume24h,
             SortColumn::Volume24h => SortColumn::Liquidity,
             SortColumn::Liquidity => SortColumn::MarketCap,
             SortColumn::MarketCap => SortColumn::Fdv,
@@ -50,7 +52,8 @@ impl SortColumn {
             SortColumn::Change24h => SortColumn::Price,
             SortColumn::Change1h => SortColumn::Change24h,
             SortColumn::Rsi => SortColumn::Change1h,
-            SortColumn::Volume24h => SortColumn::Rsi,
+            SortColumn::Yield => SortColumn::Rsi,
+            SortColumn::Volume24h => SortColumn::Yield,
             SortColumn::Liquidity => SortColumn::Volume24h,
             SortColumn::MarketCap => SortColumn::Liquidity,
             SortColumn::Fdv => SortColumn::MarketCap,
@@ -227,6 +230,7 @@ pub struct App {
     pub alert_cooldown_secs: u64,
     alerted_pairs: HashMap<String, u64>,
     pub yields: HashMap<String, Vec<YieldInfo>>,
+    pub yields_loading: bool,
 }
 
 impl App {
@@ -282,6 +286,7 @@ impl App {
             alert_cooldown_secs: alerts_cfg.cooldown_secs,
             alerted_pairs: HashMap::new(),
             yields: HashMap::new(),
+            yields_loading: false,
         }
     }
 
@@ -443,6 +448,21 @@ impl App {
                     let vol_b = pb.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
                     vol_a
                         .partial_cmp(&vol_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortColumn::Yield => {
+                    let yield_a = self
+                        .assessments
+                        .get(a)
+                        .and_then(|x| x.yields.first().and_then(|y| y.apy))
+                        .unwrap_or(0.0);
+                    let yield_b = self
+                        .assessments
+                        .get(b)
+                        .and_then(|x| x.yields.first().and_then(|y| y.apy))
+                        .unwrap_or(0.0);
+                    yield_a
+                        .partial_cmp(&yield_b)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 }
                 SortColumn::Liquidity => {

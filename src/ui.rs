@@ -113,11 +113,11 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(12), // price
         Constraint::Length(8),  // 1h %
         Constraint::Length(9),  // RSI
+        Constraint::Length(8),  // Yield
         Constraint::Length(9),  // 24h %
         Constraint::Length(12), // volume
         Constraint::Length(12), // liquidity
         Constraint::Length(12), // mcap
-        Constraint::Length(12), // fdv
         Constraint::Length(12), // signal
     ];
 
@@ -149,11 +149,12 @@ fn build_header(app: &App) -> Row<'static> {
     let price_marker = sort_marker(SortColumn::Price);
     let ch1h_marker = sort_marker(SortColumn::Change1h);
     let rsi_marker = sort_marker(SortColumn::Rsi);
+    let yield_marker = sort_marker(SortColumn::Yield);
     let ch24h_marker = sort_marker(SortColumn::Change24h);
     let vol_marker = sort_marker(SortColumn::Volume24h);
     let liq_marker = sort_marker(SortColumn::Liquidity);
     let mcap_marker = sort_marker(SortColumn::MarketCap);
-    let fdv_marker = sort_marker(SortColumn::Fdv);
+    let _fdv_marker = sort_marker(SortColumn::Fdv);
     let signal_marker = sort_marker(SortColumn::Signal);
 
     Row::new(vec![
@@ -161,11 +162,11 @@ fn build_header(app: &App) -> Row<'static> {
         Cell::from(format!("Price{price_marker}")),
         Cell::from(format!("1h%{ch1h_marker}")),
         Cell::from(format!("RSI*{rsi_marker}")),
+        Cell::from(format!("Yield{yield_marker}")),
         Cell::from(format!("24h%{ch24h_marker}")),
         Cell::from(format!("Vol 24h{vol_marker}")),
         Cell::from(format!("Liquidity{liq_marker}")),
         Cell::from(format!("MCap{mcap_marker}")),
-        Cell::from(format!("FDV{fdv_marker}")),
         Cell::from(format!("Signal{signal_marker}")),
     ])
 }
@@ -190,11 +191,20 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
             let volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
             let liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
             let mcap = pair.market_cap.unwrap_or(0.0);
-            let fdv = pair.fdv.unwrap_or(0.0);
             let (signal_label, signal_kind, rsi_value) = app
                 .assessment_for_pair_index(idx)
                 .map(|a| (a.signal.label(), a.signal, a.rsi.as_ref().map(|r| r.value)))
                 .unwrap_or(("PANTAU", TradeSignal::Watchlist, None));
+
+            let yield_str = if app.yields_loading && app.yields.is_empty() {
+                "...".to_string()
+            } else {
+                app.assessment_for_pair_index(idx)
+                    .and_then(|a| a.yields.first())
+                    .and_then(|y| y.apy)
+                    .map(|apy| format!("{apy:.1}%"))
+                    .unwrap_or_else(|| "-".to_string())
+            };
 
             Row::new(vec![
                 Cell::from(symbol.to_uppercase())
@@ -202,11 +212,11 @@ fn build_rows<'a>(app: &'a App) -> Vec<Row<'a>> {
                 Cell::from(price),
                 Cell::from(change_cell(change_1h)),
                 Cell::from(rsi_cell(rsi_value)),
+                Cell::from(yield_cell(yield_str)),
                 Cell::from(change_cell(change_24h)),
                 Cell::from(format_usd(volume)),
                 Cell::from(format_usd(liquidity)),
                 Cell::from(format_usd(mcap)),
-                Cell::from(format_usd(fdv)),
                 Cell::from(signal_label).style(signal_style(signal_kind)),
             ])
         })
@@ -262,6 +272,25 @@ fn rsi_cell(value: Option<f64>) -> Text<'static> {
             Text::from(Span::styled(format!("{rsi:>5.1}"), style))
         }
         None => Text::from(Span::styled("  -- ", Style::default().fg(Color::DarkGray))),
+    }
+}
+
+fn yield_cell(apy_str: String) -> Text<'static> {
+    if apy_str == "-" || apy_str == "..." {
+        Text::from(Span::styled(apy_str, Style::default().fg(Color::DarkGray)))
+    } else {
+        // Parse the numeric part for color coding
+        let apy: f64 = apy_str.trim_end_matches('%').parse().unwrap_or(0.0);
+        let style = if apy >= 20.0 {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if apy >= 10.0 {
+            Style::default().fg(Color::Green)
+        } else if apy >= 5.0 {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Text::from(Span::styled(apy_str, style))
     }
 }
 
@@ -434,10 +463,12 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                     )));
                 }
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled("Yield: ", Style::default().fg(Color::Cyan)),
-                    Span::styled("No data", Style::default().fg(Color::DarkGray)),
-                ]));
+                let (label, style) = if app.yields_loading {
+                    ("Yield: Memuat data...", Style::default().fg(Color::Yellow))
+                } else {
+                    ("Yield: Tidak ada data", Style::default().fg(Color::DarkGray))
+                };
+                lines.push(Line::from(Span::styled(label, style)));
             }
         }
 
