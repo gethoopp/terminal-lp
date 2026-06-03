@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 
 type FetchMessage = Result<api::FetchResult, String>;
 type BotMessage = Result<BotTaskResult, String>;
+type YieldMessage = Result<HashMap<(String, String), yield_data::YieldInfo>, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 
 enum BotTaskResult {
@@ -164,8 +165,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     let tick_rate = Duration::from_millis(cfg.app.tick_rate_ms.max(1));
     let refresh_rate = Duration::from_secs(cfg.app.refresh_rate_secs.max(1));
     let bot_check_rate = Duration::from_secs(cfg.app.bot_check_rate_secs.max(1));
+    // Yield data from DefiLlama refreshes every 5 minutes per Ira's research
+    let yield_refresh_rate = Duration::from_secs(300);
     let mut last_refresh = Instant::now();
     let mut last_bot_check = Instant::now();
+    let mut last_yield_refresh = Instant::now();
 
     loop {
         drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
@@ -189,6 +193,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                 request_bot_close(&client, &bot_tx, &mut bot_in_flight, payload);
             }
             last_bot_check = Instant::now();
+        }
+
+        if last_yield_refresh.elapsed() >= yield_refresh_rate && !yield_in_flight {
+            request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
+            last_yield_refresh = Instant::now();
         }
 
         // Handle input with timeout
@@ -331,6 +340,53 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     }
 
     Ok(())
+}
+
+fn request_yield_fetch(
+    client: &reqwest::Client,
+    yield_tx: &UnboundedSender<YieldMessage>,
+    yield_in_flight: &mut bool,
+) {
+    if *yield_in_flight {
+        return;
+    }
+    *yield_in_flight = true;
+
+    let tx = yield_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let pools = yield_data::fetch_solana_yields(&client).await?;
+            Ok(yield_data::build_yield_index(pools))
+        }
+        .await;
+        let _ = tx.send(result);
+    });
+}
+
+fn drain_yield_results(
+    yield_rx: &mut UnboundedReceiver<YieldMessage>,
+    app: &mut App,
+    yield_in_flight: &mut bool,
+) {
+    loop {
+        match yield_rx.try_recv() {
+            Ok(result) => {
+                *yield_in_flight = false;
+                match result {
+                    Ok(index) => {
+                        info!(pool_count = index.len(), "yield data updated from DefiLlama");
+                        app.update_yields(index);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "yield fetch failed, using cached data");
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
 }
 
 fn request_fetch(

@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),     // table
-            Constraint::Length(12), // analysis
+            Constraint::Length(15), // analysis
         ])
         .split(main_layout[1]);
 
@@ -350,6 +350,19 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
         let ratio_text = fdv_mcap_ratio
             .map(|v| format!("{v:.2}x"))
             .unwrap_or_else(|| "--".to_string());
+        let yield_line = assessment
+            .as_ref()
+            .and_then(|a| a.yield_info.as_ref())
+            .map(|y| y.display())
+            .unwrap_or_else(|| "Data yield belum tersedia".to_string());
+        let yield_stability = assessment
+            .as_ref()
+            .and_then(|a| a.yield_info.as_ref())
+            .and_then(|y| y.stability_note());
+        let dex_profile_line = assessment
+            .as_ref()
+            .map(|a| a.dex_profile_summary.as_str())
+            .unwrap_or("");
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
@@ -394,6 +407,21 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled("IL Est. 24h: ", Style::default().fg(Color::Cyan)),
                 Span::raw(il_estimate),
+            ]),
+            Line::from(vec![
+                Span::styled("Yield: ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    yield_line.clone(),
+                    if yield_line.starts_with("APY") && !yield_line.contains("--") {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("DEX Profile: ", Style::default().fg(Color::Cyan)),
+                Span::raw(dex_profile_line.to_string()),
             ]),
             Line::from(vec![
                 Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
