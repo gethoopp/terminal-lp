@@ -227,6 +227,7 @@ pub struct App {
     pub alert_cooldown_secs: u64,
     alerted_pairs: HashMap<String, u64>,
     pub yields: HashMap<String, Vec<YieldInfo>>,
+    pub degen_mode: bool,
 }
 
 impl App {
@@ -282,7 +283,20 @@ impl App {
             alert_cooldown_secs: alerts_cfg.cooldown_secs,
             alerted_pairs: HashMap::new(),
             yields: HashMap::new(),
+            degen_mode: false,
         }
+    }
+
+    pub fn toggle_degen_mode(&mut self) {
+        self.degen_mode = !self.degen_mode;
+        if self.degen_mode {
+            self.status_message = "DEGEN MODE ON - Showing coins 4-50h old".to_string();
+            self.sort_column = SortColumn::Age;
+            self.sort_direction = SortDirection::Ascending;
+        } else {
+            self.status_message = "DEGEN MODE OFF".to_string();
+        }
+        self.apply_filters();
     }
 
     pub fn update_yields(&mut self, yields: HashMap<String, Vec<YieldInfo>>) {
@@ -314,17 +328,6 @@ impl App {
         }
     }
 
-    /// Update the yield index from freshly fetched DefiLlama data and
-    /// re-assess all pairs so yield info in assessments is up-to-date.
-    pub fn update_yields(&mut self, index: HashMap<(String, String), YieldInfo>) {
-        self.yield_index = index;
-        self.assessments = self
-            .pairs
-            .iter()
-            .map(|p| assess_pair(p, &self.yield_index))
-            .collect();
-    }
-
     pub fn set_warning(&mut self, msg: String) {
         self.status_message = msg;
     }
@@ -337,6 +340,10 @@ impl App {
 
     pub fn apply_filters(&mut self) {
         let query = self.search_query.to_lowercase();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let mut indices: Vec<usize> = self
             .pairs
             .iter()
@@ -355,6 +362,18 @@ impl App {
 
                 if !self.dex_filter.matches(&pair.dex_id) {
                     return false;
+                }
+
+                // Degen mode: filter coins with age 4-50 hours
+                if self.degen_mode {
+                    if let Some(created_at) = pair.pair_created_at {
+                        let age_hours = (now_ms.saturating_sub(created_at)) / (1000 * 60 * 60);
+                        if !(4..=50).contains(&age_hours) {
+                            return false;
+                        }
+                    } else {
+                        return false; // No creation time means we can't filter
+                    }
                 }
 
                 if self.watchlist_only {
@@ -391,8 +410,9 @@ impl App {
         let mcap = self.min_market_cap_filter;
         let dex = self.dex_filter.label();
         let wl = if self.watchlist_only { "ON" } else { "OFF" };
+        let degen = if self.degen_mode { " | DEGEN: ON (4-50h)" } else { "" };
         self.status_message = format!(
-            "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}"
+            "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}{degen}"
         );
     }
 
@@ -1221,7 +1241,7 @@ fn microstructure_summary(pair: &PairData, notes: &mut Vec<String>, score: &mut 
     }
 }
 
-pub fn assess_pair(pair: &PairData, yield_index: &HashMap<(String, String), YieldInfo>) -> PairAssessment {
+pub fn assess_pair(pair: &PairData) -> PairAssessment {
     let change_24h = pair
         .price_change
         .as_ref()
@@ -1411,9 +1431,6 @@ pub fn assess_pair(pair: &PairData, yield_index: &HashMap<(String, String), Yiel
     if notes.is_empty() {
         notes.push("Data belum cukup untuk sinyal kuat.".to_string());
     }
-
-    let yield_info = match_yield(pair, yield_index);
-    let dex_profile = dex_profile_summary(&pair.dex_id);
 
     PairAssessment {
         signal,
@@ -1626,8 +1643,7 @@ mod tests {
             change.h1 = Some(3.0);
             change.m5 = Some(1.5);
         }
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert_eq!(assessed.signal, TradeSignal::GoodEntry);
         assert!(assessed.score >= 67);
     }
@@ -1639,8 +1655,7 @@ mod tests {
             change.h24 = Some(-30.0);
             change.h1 = Some(-8.0);
         }
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert_eq!(assessed.signal, TradeSignal::Avoid);
         assert!(assessed.score < 45);
     }
@@ -1653,8 +1668,7 @@ mod tests {
             change.h1 = Some(-2.0);
             change.m5 = Some(-3.0);
         }
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed.notes.iter().any(|x| x.contains("blow-off")));
         assert!(assessed.score < 67);
     }
@@ -1667,8 +1681,7 @@ mod tests {
             change.h1 = Some(9.0);
             change.m5 = Some(2.5);
         }
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed
             .notes
             .iter()
@@ -1702,8 +1715,7 @@ mod tests {
             url: None,
         };
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!((0..=100).contains(&assessed.score));
         assert!(!assessed.notes.is_empty());
     }
@@ -1724,8 +1736,7 @@ mod tests {
             h24: None,
         });
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed.bias_summary.contains("bias pilih RAY"));
     }
 
@@ -1745,8 +1756,7 @@ mod tests {
             h24: None,
         });
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed.bias_summary.contains("bias pilih SOL"));
     }
 
@@ -1759,8 +1769,7 @@ mod tests {
             .as_millis() as u64;
         pair.pair_created_at = Some(now_ms.saturating_sub(30 * 60 * 1000)); // 30 min old
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed
             .notes
             .iter()
@@ -1773,8 +1782,7 @@ mod tests {
         let mut pair = sample_pair("AAA", 400_000.0, 120_000.0);
         pair.quote_token.symbol = Some("XYZ".to_string());
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed
             .notes
             .iter()
@@ -1804,8 +1812,7 @@ mod tests {
             change.h24 = Some(18.0);
         }
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         assert!(assessed.microstructure_summary.contains("Microstructure"));
         assert!(assessed.health_bar.contains("/100"));
         assert!(assessed.il_estimate_24h_pct.is_some());
@@ -1821,8 +1828,7 @@ mod tests {
             change.h24 = Some(16.0);
         }
 
-        let empty_yield = HashMap::new();
-        let assessed = assess_pair(&pair, &empty_yield);
+        let assessed = assess_pair(&pair);
         let rsi = assessed.rsi.expect("RSI should exist");
         assert!(rsi.value > 50.0);
         assert!(rsi.display().contains("Bullish") || rsi.display().contains("Overbought"));

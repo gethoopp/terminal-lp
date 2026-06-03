@@ -352,17 +352,9 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .unwrap_or_else(|| "--".to_string());
         let yield_line = assessment
             .as_ref()
-            .and_then(|a| a.yield_info.as_ref())
-            .map(|y| y.display())
+            .and_then(|a| a.yields.first())
+            .map(|y| y.display_apy())
             .unwrap_or_else(|| "Data yield belum tersedia".to_string());
-        let yield_stability = assessment
-            .as_ref()
-            .and_then(|a| a.yield_info.as_ref())
-            .and_then(|y| y.stability_note());
-        let dex_profile_line = assessment
-            .as_ref()
-            .map(|a| a.dex_profile_summary.as_str())
-            .unwrap_or("");
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("Screener: ", Style::default().fg(Color::Cyan)),
@@ -418,10 +410,6 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                         Style::default().fg(Color::DarkGray)
                     },
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("DEX Profile: ", Style::default().fg(Color::Cyan)),
-                Span::raw(dex_profile_line.to_string()),
             ]),
             Line::from(vec![
                 Span::styled("Bias Pair: ", Style::default().fg(Color::Cyan)),
@@ -564,6 +552,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" open mode  "),
         Span::styled("f", Style::default().fg(Color::Cyan)),
         Span::raw(" DEX filter  "),
+        Span::styled("g", Style::default().fg(Color::Cyan)),
+        Span::raw(" degen  "),
         Span::styled("w", Style::default().fg(Color::Cyan)),
         Span::raw(" watchlist  "),
         Span::styled("W", Style::default().fg(Color::Cyan)),
@@ -606,6 +596,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         format_usd(app.min_market_cap_filter),
         Style::default().fg(Color::Yellow),
     ));
+    
+    // Show degen mode status
+    if app.degen_mode {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "DEGEN: ON",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    }
+    
     spans.push(Span::raw("  DEX: "));
     spans.push(Span::styled(
         app.dex_filter.label(),
