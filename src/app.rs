@@ -290,7 +290,7 @@ impl App {
     pub fn toggle_degen_mode(&mut self) {
         self.degen_mode = !self.degen_mode;
         if self.degen_mode {
-            self.status_message = "DEGEN MODE ON - Showing coins 4-50h old".to_string();
+            self.status_message = "DEGEN MODE ON - Showing coins 4-300h old".to_string();
             self.sort_column = SortColumn::Age;
             self.sort_direction = SortDirection::Ascending;
         } else {
@@ -368,7 +368,7 @@ impl App {
                 if self.degen_mode {
                     if let Some(created_at) = pair.pair_created_at {
                         let age_hours = (now_ms.saturating_sub(created_at)) / (1000 * 60 * 60);
-                        if !(4..=50).contains(&age_hours) {
+                        if !(4..=300).contains(&age_hours) {
                             return false;
                         }
                     } else {
@@ -410,7 +410,7 @@ impl App {
         let mcap = self.min_market_cap_filter;
         let dex = self.dex_filter.label();
         let wl = if self.watchlist_only { "ON" } else { "OFF" };
-        let degen = if self.degen_mode { " | DEGEN: ON (4-50h)" } else { "" };
+        let degen = if self.degen_mode { " | DEGEN: ON (4-300h)" } else { "" };
         self.status_message = format!(
             "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}{degen}"
         );
