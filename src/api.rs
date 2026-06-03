@@ -359,3 +359,81 @@ pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResul
         warnings,
     })
 }
+
+/// Fetch degen pairs: uses the DexScreener token-boosts endpoint to find recently
+/// boosted Solana tokens, then fetches their pair data. This surfaces new/trending
+/// tokens that normal keyword queries miss.
+pub async fn fetch_degen_pairs(client: &reqwest::Client) -> Result<FetchResult, String> {
+    let api_cfg = &config::active_config().api;
+
+    // 1. Fetch top boosted token addresses on Solana
+    let boosts_url = "https://api.dexscreener.com/token-boosts/latest/v1";
+    let boosts_resp = client
+        .get(boosts_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+        .map_err(|e| format!("boosts request failed: {e}"))?;
+
+    let boosts_body = boosts_resp
+        .text()
+        .await
+        .map_err(|e| format!("boosts read: {e}"))?;
+
+    #[derive(serde::Deserialize)]
+    struct BoostItem {
+        #[serde(rename = "chainId")]
+        chain_id: String,
+        #[serde(rename = "tokenAddress")]
+        token_address: String,
+    }
+
+    let boosts: Vec<BoostItem> =
+        serde_json::from_str(&boosts_body).unwrap_or_default();
+
+    let token_addresses: Vec<String> = boosts
+        .into_iter()
+        .filter(|b| b.chain_id == "solana")
+        .map(|b| b.token_address)
+        .take(30)
+        .collect();
+
+    if token_addresses.is_empty() {
+        return Ok(FetchResult { pairs: vec![], warnings: vec!["No boosted tokens found".to_string()] });
+    }
+
+    // 2. Batch fetch pairs for those tokens (DexScreener allows comma-separated addresses)
+    let chunks: Vec<String> = token_addresses
+        .chunks(10)
+        .map(|c| c.join(","))
+        .collect();
+
+    let mut all_pairs: Vec<PairData> = Vec::new();
+    let mut warnings = Vec::new();
+
+    for chunk in &chunks {
+        let url = format!("https://api.dexscreener.com/latest/dex/tokens/{chunk}");
+        match client
+            .get(&url)
+            .header("User-Agent", "volatile-scanner/0.1")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(body) = resp.text().await {
+                    if let Ok(data) = serde_json::from_str::<DexResponse>(&body) {
+                        for pair in data.pairs.unwrap_or_default() {
+                            if pair.chain_id == "solana" {
+                                all_pairs.push(pair);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => warnings.push(format!("token fetch failed: {e}")),
+        }
+        sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+    }
+
+    Ok(FetchResult { pairs: all_pairs, warnings })
+}

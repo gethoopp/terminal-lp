@@ -313,6 +313,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     }
                     KeyCode::Char('g') | KeyCode::Char('G') => {
                         app.toggle_degen_mode();
+                        // Refetch with the appropriate data source for the new mode
+                        if !fetch_in_flight {
+                            request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
+                            last_refresh = Instant::now();
+                        }
                     }
                     KeyCode::Char('R') => {
                         // Force refresh
@@ -356,15 +361,24 @@ fn request_fetch(
 
     *fetch_in_flight = true;
     app.is_loading = true;
-    app.set_warning(String::from(
-        "Fetching data market (DexScreener/Jupiter fallback)...",
-    ));
 
+    let degen = app.degen_mode;
     let tx = fetch_tx.clone();
     let client = client.clone();
-    tokio::spawn(async move {
-        let _ = tx.send(api::fetch_volatile_pairs(&client).await);
-    });
+
+    if degen {
+        app.set_warning(String::from("Fetching degen pairs (token-boosts)..."));
+        tokio::spawn(async move {
+            let _ = tx.send(api::fetch_degen_pairs(&client).await);
+        });
+    } else {
+        app.set_warning(String::from(
+            "Fetching data market (DexScreener/Jupiter fallback)...",
+        ));
+        tokio::spawn(async move {
+            let _ = tx.send(api::fetch_volatile_pairs(&client).await);
+        });
+    }
 }
 
 fn drain_fetch_results(

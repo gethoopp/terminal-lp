@@ -349,28 +349,28 @@ impl App {
                 let liq = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
                 let mcap = pair.market_cap.unwrap_or(0.0);
 
-                if vol < self.min_volume_filter
-                    || liq < self.min_liquidity_filter
-                    || mcap < self.min_market_cap_filter
-                {
-                    return false;
-                }
-
-                if !self.dex_filter.matches(&pair.dex_id) {
-                    return false;
-                }
-
-                // Degen mode: filter coins with age 4-50 hours
-                // Using pair_age_hours() for float-based consistency with UI display
                 if self.degen_mode {
-                    // Enforce $30K minimum liquidity in degen mode to reduce rug risk
-                    let degen_liq_floor = 30_000.0_f64;
-                    if liq < degen_liq_floor.max(self.min_liquidity_filter) {
+                    // Degen mode: bypass normal vol/liq/mcap floors.
+                    // Only require liq >= $1K and age 4–300h.
+                    if liq < 1_000.0 {
                         return false;
                     }
-                    // Use float-based age calculation for consistency
-                    let age_hours = pair_age_hours(pair).unwrap_or(0.0);
-                    if !(4.0..=300.0).contains(&age_hours) {
+                    if !self.dex_filter.matches(&pair.dex_id) {
+                        return false;
+                    }
+                    // Pairs with no creation time are excluded (can't verify age)
+                    match pair_age_hours(pair) {
+                        Some(age_hours) if (4.0..=300.0).contains(&age_hours) => {}
+                        _ => return false,
+                    }
+                } else {
+                    if vol < self.min_volume_filter
+                        || liq < self.min_liquidity_filter
+                        || mcap < self.min_market_cap_filter
+                    {
+                        return false;
+                    }
+                    if !self.dex_filter.matches(&pair.dex_id) {
                         return false;
                     }
                 }
