@@ -581,7 +581,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" mcap filter  "),
         Span::styled("h", Style::default().fg(Color::Cyan)),
         Span::raw(" help  "),
-        Span::styled("P", Style::default().fg(Color::Cyan)),
+        Span::styled(";", Style::default().fg(Color::Cyan)),
         Span::raw(" portfolio  "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit"),
@@ -746,10 +746,16 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let history = &app.trade_history;
 
-    // Summary stats
+    // Summary stats - filter out NaN values when summing
     let total_trades = history.len();
-    let wins = history.iter().filter(|t| t.pnl_pct > 0.0).count();
-    let total_pnl: f64 = history.iter().map(|t| t.pnl_pct).sum();
+    let wins = history.iter().filter(|t| t.pnl_pct > 0.0 && !t.pnl_pct.is_nan()).count();
+    let total_pnl: f64 = history
+        .iter()
+        .map(|t| t.pnl_pct)
+        .filter(|p| !p.is_nan() && !p.is_infinite())
+        .sum();
+    // Ensure total_pnl is displayable (should be safe after filtering, but double check)
+    let total_pnl = if total_pnl.is_nan() || total_pnl.is_infinite() { 0.0 } else { total_pnl };
     let win_rate = if total_trades > 0 {
         100.0 * wins as f64 / total_trades as f64
     } else {
@@ -803,14 +809,19 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(" Summary "));
     frame.render_widget(summary, layout[1]);
 
-    // Trade history table
+    // Trade history table - limit display to avoid terminal overflow
+    // Calculate max rows based on available space (subtract 3 for borders + header)
+    let available_height = layout[2].height.saturating_sub(3) as usize;
+    let max_display = available_height.clamp(1, 100); // Cap at 100 to prevent huge renders
+    
     let header_cells = ["Closed At", "Symbol", "Entry", "Exit", "PnL%", "Size USD", "Reason"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
     let table_header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = history.iter().rev().map(|t| {
-        let pnl_style = if t.pnl_pct >= 0.0 {
+    let rows: Vec<Row> = history.iter().rev().take(max_display).map(|t| {
+        let pnl_val = if t.pnl_pct.is_nan() || t.pnl_pct.is_infinite() { 0.0 } else { t.pnl_pct };
+        let pnl_style = if pnl_val >= 0.0 {
             Style::default().fg(Color::Green)
         } else {
             Style::default().fg(Color::Red)
@@ -820,7 +831,7 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
             Cell::from(t.symbol.clone()),
             Cell::from(format!("${:.8}", t.entry_price)),
             Cell::from(format!("${:.8}", t.exit_price)),
-            Cell::from(format!("{:+.2}%", t.pnl_pct)).style(pnl_style),
+            Cell::from(format!("{pnl_val:+.2}%")).style(pnl_style),
             Cell::from(format!("${:.0}", t.position_size_usd)),
             Cell::from(t.reason.clone()),
         ])
@@ -830,6 +841,12 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
         "  Belum ada trade yang tercatat. Trade akan muncul di sini setelah posisi ditutup."
     } else {
         ""
+    };
+
+    let title = if history.len() > max_display {
+        format!(" Trade History (showing {} of {}, newest first) ", max_display, history.len())
+    } else {
+        " Trade History (newest first) ".to_string()
     };
 
     let table = Table::new(
@@ -845,7 +862,7 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
         ],
     )
     .header(table_header)
-    .block(Block::default().borders(Borders::ALL).title(" Trade History (newest first) "));
+    .block(Block::default().borders(Borders::ALL).title(title));
 
     if history.is_empty() {
         let empty = Paragraph::new(empty_msg)
@@ -857,8 +874,8 @@ fn render_portfolio(frame: &mut Frame, app: &App) {
         frame.render_stateful_widget(table, layout[2], &mut state);
     }
 
-    // Footer
-    let hint = Paragraph::new("  P/Esc = tutup portfolio | e = export CSV | q = quit")
+    // Footer - updated to reflect ; key instead of P
+    let hint = Paragraph::new("  ;/Esc = tutup portfolio | e = export CSV | q = quit")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, layout[3]);
 }

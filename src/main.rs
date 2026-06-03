@@ -218,7 +218,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
 
                 if app.show_portfolio {
                     match key.code {
-                        KeyCode::Char('P') | KeyCode::Char('p') | KeyCode::Esc | KeyCode::Char('q') => {
+                        KeyCode::Char(';') | KeyCode::Esc | KeyCode::Char('q') => {
                             app.toggle_portfolio();
                         }
                         KeyCode::Char('e') | KeyCode::Char('E') => {
@@ -246,7 +246,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Char('h') => app.toggle_help(),
-                    KeyCode::Char('P') => app.toggle_portfolio(),
+                    KeyCode::Char(';') => app.toggle_portfolio(),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
                     KeyCode::Right => {
