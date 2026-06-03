@@ -1,6 +1,8 @@
 use crate::api::PairData;
 use crate::config;
 use crate::rsi::RsiInfo;
+use crate::yield_mod;
+use crate::yield_mod::YieldInfo;
 use chrono::Local;
 use csv::Writer;
 use serde::{Deserialize, Serialize};
@@ -142,6 +144,7 @@ pub struct PairAssessment {
     pub health_bar: String,
     pub notes: Vec<String>,
     pub rsi: Option<RsiInfo>,
+    pub yields: Vec<YieldInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +226,7 @@ pub struct App {
     pub alert_threshold_pct: f64,
     pub alert_cooldown_secs: u64,
     alerted_pairs: HashMap<String, u64>,
+    pub yields: HashMap<String, Vec<YieldInfo>>,
 }
 
 impl App {
@@ -277,12 +281,27 @@ impl App {
             alert_threshold_pct: alerts_cfg.change_24h_threshold_pct,
             alert_cooldown_secs: alerts_cfg.cooldown_secs,
             alerted_pairs: HashMap::new(),
+            yields: HashMap::new(),
         }
+    }
+
+    pub fn update_yields(&mut self, yields: HashMap<String, Vec<YieldInfo>>) {
+        self.yields = yields;
+        self.assessments = self
+            .pairs
+            .iter()
+            .map(|p| assess_pair_with_yields(p, &self.yields))
+            .collect();
+        self.apply_filters();
     }
 
     pub fn update_pairs(&mut self, pairs: Vec<PairData>) {
         self.pairs = pairs;
-        self.assessments = self.pairs.iter().map(assess_pair).collect();
+        self.assessments = self
+            .pairs
+            .iter()
+            .map(|p| assess_pair_with_yields(p, &self.yields))
+            .collect();
         self.apply_filters();
         self.last_update = Local::now().format("%H:%M:%S").to_string();
         let count = self.pairs.len();
@@ -1391,7 +1410,42 @@ pub fn assess_pair(pair: &PairData) -> PairAssessment {
         health_bar: build_health_bar(score),
         notes,
         rsi,
+        yields: Vec::new(),
     }
+}
+
+pub fn assess_pair_with_yields(
+    pair: &PairData,
+    yields_map: &HashMap<String, Vec<YieldInfo>>,
+) -> PairAssessment {
+    let mut assessment = assess_pair(pair);
+
+    let matched_yields = yield_mod::match_yield_to_pair(
+        &pair.base_token.address,
+        &pair.quote_token.address,
+        yields_map,
+    );
+
+    assessment.yields = matched_yields;
+
+    if !assessment.yields.is_empty() {
+        if let Some(best_yield) = assessment.yields.first() {
+            if let Some(apy) = best_yield.apy {
+                if apy >= 15.0 {
+                    assessment.score += 3;
+                    assessment.notes.push(format!(
+                        "Yield tinggi tersedia: {} ({})",
+                        best_yield.display_apy(),
+                        best_yield.dex_name.label()
+                    ));
+                } else if apy >= 10.0 {
+                    assessment.score += 1;
+                }
+            }
+        }
+    }
+
+    assessment
 }
 
 #[cfg(test)]

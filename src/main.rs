@@ -4,6 +4,7 @@ mod config;
 mod logger;
 mod rsi;
 mod ui;
+mod yield_mod;
 
 use app::{App, BotCloseInput, BotOpenInput, BotPosition};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -15,6 +16,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedSender};
@@ -148,12 +150,16 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     let client = api::build_http_client().map_err(std::io::Error::other)?;
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel::<FetchMessage>();
     let (bot_tx, mut bot_rx) = mpsc::unbounded_channel::<BotMessage>();
+    let (yield_tx, mut yield_rx) =
+        mpsc::unbounded_channel::<HashMap<String, Vec<yield_mod::YieldInfo>>>();
     let mut fetch_in_flight = false;
     let mut bot_in_flight = false;
+    let mut yield_in_flight = false;
     let export_dir = config::resolve_path(&cfg.export.directory);
 
     // Initial data fetch in background to keep UI responsive.
     request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
+    request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
 
     let tick_rate = Duration::from_millis(cfg.app.tick_rate_ms.max(1));
     let refresh_rate = Duration::from_secs(cfg.app.refresh_rate_secs.max(1));
@@ -164,12 +170,18 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     loop {
         drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
         drain_bot_results(&mut bot_rx, &mut app, &mut bot_in_flight);
+        drain_yield_results(&mut yield_rx, &mut app, &mut yield_in_flight);
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Auto-refresh
         if last_refresh.elapsed() >= refresh_rate && !app.show_help && !fetch_in_flight {
             request_fetch(&client, &fetch_tx, &mut fetch_in_flight, &mut app);
             last_refresh = Instant::now();
+        }
+
+        // Yield refresh (every 5 minutes)
+        if last_refresh.elapsed() >= Duration::from_secs(300) && !yield_in_flight {
+            request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
         }
 
         if last_bot_check.elapsed() >= bot_check_rate && !bot_in_flight {
@@ -464,6 +476,51 @@ fn drain_bot_results(
             Err(TryRecvError::Disconnected) => {
                 *bot_in_flight = false;
                 app.set_bot_error("CHANNEL", "Bot channel disconnected");
+                break;
+            }
+        }
+    }
+}
+
+fn request_yield_fetch(
+    client: &reqwest::Client,
+    yield_tx: &UnboundedSender<HashMap<String, Vec<yield_mod::YieldInfo>>>,
+    yield_in_flight: &mut bool,
+) {
+    if *yield_in_flight {
+        return;
+    }
+
+    *yield_in_flight = true;
+    let tx = yield_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let result = yield_mod::fetch_yields(&client).await;
+        match result {
+            Ok(yields) => {
+                let _ = tx.send(yields);
+            }
+            Err(err) => {
+                warn!("Failed to fetch yield data: {}", err);
+            }
+        }
+    });
+}
+
+fn drain_yield_results(
+    yield_rx: &mut UnboundedReceiver<HashMap<String, Vec<yield_mod::YieldInfo>>>,
+    app: &mut App,
+    yield_in_flight: &mut bool,
+) {
+    loop {
+        match yield_rx.try_recv() {
+            Ok(yields) => {
+                *yield_in_flight = false;
+                app.update_yields(yields);
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                *yield_in_flight = false;
                 break;
             }
         }
