@@ -439,7 +439,7 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled("Yield: ", Style::default().fg(Color::Cyan)),
                     Span::styled(
-                        assessment.yields.len().to_string() + " pools tersedia",
+                        format!("{} pools tersedia", assessment.yields.len()),
                         Style::default().fg(Color::Green),
                     ),
                 ]));
@@ -448,10 +448,35 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
                     let apy_str = y.display_apy();
                     let dex = y.dex_name.label();
                     let label = if idx == 0 { "  Best:  " } else { "  Alt:   " };
+
+                    // APY breakdown: Fee vs Reward
+                    let fee_str = y
+                        .apy_base
+                        .map(|b| format!("{b:.1}%"))
+                        .unwrap_or_else(|| "-".to_string());
+                    let reward_str = y
+                        .apy_reward
+                        .map(|r| format!("{r:.1}%"))
+                        .unwrap_or_else(|| "-".to_string());
+
+                    // 30d average context
+                    let avg_30d = y
+                        .apy_mean_30d
+                        .map(|a| format!(" | 30d avg: {a:.1}%"))
+                        .unwrap_or_default();
+
                     lines.push(Line::from(vec![
                         Span::styled(label, Style::default().fg(Color::DarkGray)),
                         Span::raw(format!("{apy_str} APY ({dex})")),
                         Span::raw(if y.il_risk { " | IL Risk" } else { "" }),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("         ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("Fee: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(fee_str),
+                        Span::styled(" | Reward: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(reward_str),
+                        Span::raw(avg_30d),
                     ]));
                 }
 

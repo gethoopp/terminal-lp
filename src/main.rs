@@ -183,8 +183,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
             last_refresh = Instant::now();
         }
 
-        // Yield refresh (every 5 minutes)
-        if last_refresh.elapsed() >= Duration::from_secs(300) && !yield_in_flight {
+        // Yield refresh (every 3 minutes for volatile APY)
+        if last_refresh.elapsed() >= Duration::from_secs(180) && !yield_in_flight {
             request_yield_fetch(&client, &yield_tx, &mut yield_in_flight);
         }
 
