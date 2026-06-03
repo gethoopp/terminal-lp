@@ -125,7 +125,7 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(header_row.style(header_style))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            " Pairs ({pair_count}) — ↑↓ scroll | ←→ sort | f DEX | w watchlist | W watchlist only | s search | x export CSV | +/-/[ ]/{{ }} filters | h help | q quit "
+            " Pairs ({pair_count}) — ↑↓ scroll | ←→ sort | f DEX | w watchlist | W watchlist only | s search | x export CSV | +/-/[ ]/,. filters | h help | q quit "
         )))
         .row_highlight_style(highlight_style)
         .column_spacing(1);
@@ -571,8 +571,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("[", Style::default().fg(Color::DarkGray)),
         Span::styled("]", Style::default().fg(Color::DarkGray)),
         Span::raw(" liq filter  "),
-        Span::styled("{", Style::default().fg(Color::DarkGray)),
-        Span::styled("}", Style::default().fg(Color::DarkGray)),
+        Span::styled(",", Style::default().fg(Color::DarkGray)),
+        Span::styled(".", Style::default().fg(Color::DarkGray)),
         Span::raw(" mcap filter  "),
         Span::styled("h", Style::default().fg(Color::Cyan)),
         Span::raw(" help  "),

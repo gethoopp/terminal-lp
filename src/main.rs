@@ -257,12 +257,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         app.min_liquidity_filter += 500.0;
                         app.apply_filters();
                     }
-                    KeyCode::Char('{') => {
+                    KeyCode::Char(',') => {
                         app.min_market_cap_filter =
                             (app.min_market_cap_filter - 10_000.0).max(0.0);
                         app.apply_filters();
                     }
-                    KeyCode::Char('}') => {
+                    KeyCode::Char('.') => {
                         app.min_market_cap_filter += 10_000.0;
                         app.apply_filters();
                     }
