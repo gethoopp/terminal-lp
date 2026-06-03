@@ -290,7 +290,7 @@ impl App {
     pub fn toggle_degen_mode(&mut self) {
         self.degen_mode = !self.degen_mode;
         if self.degen_mode {
-            self.status_message = "DEGEN MODE ON - Showing coins 4-50h old".to_string();
+            self.status_message = "DEGEN MODE ON - Showing coins 4-50h old, min $30K liquidity".to_string();
             self.sort_column = SortColumn::Age;
             self.sort_direction = SortDirection::Ascending;
         } else {
@@ -340,10 +340,6 @@ impl App {
 
     pub fn apply_filters(&mut self) {
         let query = self.search_query.to_lowercase();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
         let mut indices: Vec<usize> = self
             .pairs
             .iter()
@@ -365,14 +361,17 @@ impl App {
                 }
 
                 // Degen mode: filter coins with age 4-50 hours
+                // Using pair_age_hours() for float-based consistency with UI display
                 if self.degen_mode {
-                    if let Some(created_at) = pair.pair_created_at {
-                        let age_hours = (now_ms.saturating_sub(created_at)) / (1000 * 60 * 60);
-                        if !(4..=50).contains(&age_hours) {
-                            return false;
-                        }
-                    } else {
-                        return false; // No creation time means we can't filter
+                    // Enforce $30K minimum liquidity in degen mode to reduce rug risk
+                    let degen_liq_floor = 30_000.0_f64;
+                    if liq < degen_liq_floor.max(self.min_liquidity_filter) {
+                        return false;
+                    }
+                    // Use float-based age calculation for consistency
+                    let age_hours = pair_age_hours(pair).unwrap_or(0.0);
+                    if !(4.0..=50.0).contains(&age_hours) {
+                        return false;
                     }
                 }
 
@@ -410,7 +409,7 @@ impl App {
         let mcap = self.min_market_cap_filter;
         let dex = self.dex_filter.label();
         let wl = if self.watchlist_only { "ON" } else { "OFF" };
-        let degen = if self.degen_mode { " | DEGEN: ON (4-50h)" } else { "" };
+        let degen = if self.degen_mode { " | DEGEN: ON (4-50h, Liq>=$30K)" } else { "" };
         self.status_message = format!(
             "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}{degen}"
         );
