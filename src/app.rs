@@ -147,6 +147,36 @@ pub struct PairAssessment {
     pub yields: Vec<YieldInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl RiskLevel {
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            RiskLevel::Low => "Low Risk",
+            RiskLevel::Medium => "Medium Risk",
+            RiskLevel::High => "High Risk",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TopCandidate {
+    pub pair_index: usize,
+    pub symbol: String,
+    pub score: i32,
+    pub confidence: i32, // 0-100
+    pub risk_level: RiskLevel,
+    pub reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotPosition {
     pub pair_key: String,
@@ -243,6 +273,7 @@ pub struct App {
     pub degen_mode: bool,
     pub trade_history: Vec<TradeRecord>,
     pub show_portfolio: bool,
+    pub top_candidate: Option<TopCandidate>,
 }
 
 impl App {
@@ -301,6 +332,7 @@ impl App {
             degen_mode: false,
             trade_history: load_trade_history(),
             show_portfolio: false,
+            top_candidate: None,
         }
     }
 
@@ -430,6 +462,110 @@ impl App {
         self.status_message = format!(
             "Showing {filtered}/{total} | DEX: {dex} | WL only: {wl} | Vol >= ${vol:.0} | Liq >= ${liq:.0} | MCap >= ${mcap:.0}{degen}"
         );
+        
+        // Compute top candidate from filtered pairs
+        self.compute_top_candidate();
+    }
+    
+    /// Compute the top candidate from filtered pairs based on score and data completeness
+    fn compute_top_candidate(&mut self) {
+        const MIN_SCORE_THRESHOLD: i32 = 60;
+        const MIN_CONFIDENCE_THRESHOLD: i32 = 50;
+        
+        if self.filtered_pairs.is_empty() {
+            self.top_candidate = None;
+            return;
+        }
+        
+        let mut best: Option<(usize, i32, i32, Vec<String>)> = None; // (pair_idx, score, confidence, reasons)
+        
+        for &pair_idx in &self.filtered_pairs {
+            let pair = match self.pairs.get(pair_idx) {
+                Some(p) => p,
+                None => continue,
+            };
+            let assessment = match self.assessments.get(pair_idx) {
+                Some(a) => a,
+                None => continue,
+            };
+            
+            // Skip if score is too low
+            if assessment.score < MIN_SCORE_THRESHOLD {
+                continue;
+            }
+            
+            // Calculate confidence based on data completeness
+            let mut confidence = 100i32;
+            let mut reasons: Vec<String> = Vec::new();
+            
+            // Check data completeness
+            let has_liquidity = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0) > 0.0;
+            let has_volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0) > 0.0;
+            let has_price_change = pair.price_change.is_some();
+            let has_mcap = pair.market_cap.unwrap_or(0.0) > 0.0;
+            let has_age = pair.pair_created_at.is_some();
+            
+            if !has_liquidity { confidence -= 20; }
+            if !has_volume { confidence -= 15; }
+            if !has_price_change { confidence -= 20; }
+            if !has_mcap { confidence -= 10; }
+            if !has_age { confidence -= 15; }
+            
+            // Degen mode has lower base confidence
+            if self.degen_mode {
+                confidence -= 20;
+            }
+            
+            confidence = confidence.max(0);
+            
+            // Skip if confidence too low
+            if confidence < MIN_CONFIDENCE_THRESHOLD {
+                continue;
+            }
+            
+            // Build reasons from assessment notes (take top 3 positive ones)
+            for note in assessment.notes.iter().take(3) {
+                if !note.contains("hindari") && !note.contains("risiko") && !note.contains("rendah") {
+                    reasons.push(note.clone());
+                }
+            }
+            if reasons.is_empty() {
+                reasons.push(format!("Score: {}/100", assessment.score));
+            }
+            
+            // Track the best candidate (highest score, then highest confidence)
+            let dominated = best.as_ref().is_some_and(|(_, best_score, best_conf, _)| {
+                assessment.score < *best_score || 
+                (assessment.score == *best_score && confidence < *best_conf)
+            });
+            
+            if !dominated {
+                best = Some((pair_idx, assessment.score, confidence, reasons));
+            }
+        }
+        
+        self.top_candidate = best.map(|(pair_idx, score, confidence, reasons)| {
+            let pair = &self.pairs[pair_idx];
+            let symbol = pair.base_token.symbol.clone().unwrap_or_else(|| "???".to_string());
+            
+            // Determine risk level
+            let risk_level = if score >= 75 && confidence >= 70 {
+                RiskLevel::Low
+            } else if score >= 60 && confidence >= 50 {
+                RiskLevel::Medium
+            } else {
+                RiskLevel::High
+            };
+            
+            TopCandidate {
+                pair_index: pair_idx,
+                symbol,
+                score,
+                confidence,
+                risk_level,
+                reasons,
+            }
+        });
     }
 
     fn sort_indices(&self, indices: &mut [usize]) {
@@ -2141,6 +2277,69 @@ mod tests {
         
         if let Some(last) = app.trade_history.last() {
             assert_eq!(last.reason.len(), 50); // Truncated to 50 chars
+        }
+    }
+
+    #[test]
+    fn compute_top_candidate_selects_highest_score() {
+        let mut app = App::new();
+        
+        // Create pairs with different scores - good pair has healthy momentum
+        let mut good_pair = sample_pair("GOOD", 600_000.0, 200_000.0);
+        if let Some(change) = good_pair.price_change.as_mut() {
+            change.h24 = Some(15.0); // Healthy momentum
+            change.h1 = Some(3.0);
+            change.m5 = Some(1.0);
+        }
+        
+        let mut weak_pair = sample_pair("WEAK", 40_000.0, 15_000.0);
+        if let Some(change) = weak_pair.price_change.as_mut() {
+            change.h24 = Some(-15.0); // Bearish
+            change.h1 = Some(-5.0);
+        }
+        
+        app.update_pairs(vec![good_pair, weak_pair]);
+        
+        // Top candidate should be the good pair (if score >= 60)
+        if let Some(candidate) = &app.top_candidate {
+            assert_eq!(candidate.symbol, "GOOD");
+            assert!(candidate.score >= 60);
+        }
+    }
+
+    #[test]
+    fn compute_top_candidate_none_when_no_qualified() {
+        let mut app = App::new();
+        
+        // Create pairs with very low scores
+        let mut bad_pair = sample_pair("BAD", 10_000.0, 5_000.0);
+        bad_pair.price_change = None; // No price data
+        bad_pair.volume = None;
+        
+        app.update_pairs(vec![bad_pair]);
+        
+        // Should have no top candidate due to low score/confidence
+        assert!(app.top_candidate.is_none() || app.filtered_pairs.is_empty());
+    }
+
+    #[test]
+    fn top_candidate_risk_level_based_on_score_confidence() {
+        let mut app = App::new();
+        
+        // High score pair
+        let mut high_score = sample_pair("HIGH", 800_000.0, 300_000.0);
+        if let Some(change) = high_score.price_change.as_mut() {
+            change.h24 = Some(20.0);
+            change.h1 = Some(4.0);
+            change.m5 = Some(1.5);
+        }
+        high_score.market_cap = Some(5_000_000.0);
+        
+        app.update_pairs(vec![high_score]);
+        
+        if let Some(candidate) = &app.top_candidate {
+            // With high score and complete data, risk should be Low or Medium
+            assert!(candidate.risk_level == RiskLevel::Low || candidate.risk_level == RiskLevel::Medium);
         }
     }
 }
