@@ -31,7 +31,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),     // table
-            Constraint::Length(3),  // top candidate
+            Constraint::Length(6),  // top candidates
             Constraint::Length(15), // analysis
         ])
         .split(main_layout[1]);
@@ -546,58 +546,47 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_top_candidate(frame: &mut Frame, area: Rect, app: &App) {
-    let content = match app.top_candidate() {
-        None => {
-            let msg = if app.filtered_pairs.is_empty() {
-                " 🔍 Top Candidate: No qualified candidate — no pairs match current filters"
-            } else {
-                " 🔍 Top Candidate: No qualified candidate right now (data incomplete or score too low)"
-            };
-            Paragraph::new(msg)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL))
-        }
-        Some((pair, assessment)) => {
-            let symbol = pair
-                .base_token
-                .symbol
-                .as_deref()
-                .unwrap_or("?");
+    let candidates = app.top_candidates();
+    let max_rows = (area.height.saturating_sub(2)) as usize; // subtract border rows
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        " 🔍 Candidates (sorted by score)",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))];
+
+    if candidates.is_empty() {
+        let msg = if app.filtered_pairs.is_empty() {
+            " No pairs match current filters"
+        } else {
+            " No qualified candidate right now (data incomplete or score too low)"
+        };
+        lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::DarkGray))));
+    } else {
+        for (pair, assessment) in candidates.iter().take(max_rows.saturating_sub(1)) {
+            let symbol = pair.base_token.symbol.as_deref().unwrap_or("?");
             let score = assessment.score;
-            let risk_label = match &assessment.signal {
-                TradeSignal::GoodEntry => "Low-Med Risk",
-                TradeSignal::Watchlist => "Med Risk",
-                TradeSignal::Avoid => "High Risk",
+            let (color, badge) = match &assessment.signal {
+                TradeSignal::GoodEntry => (Color::Green, "★"),
+                TradeSignal::Watchlist => (Color::Yellow, "◉"),
+                TradeSignal::Avoid => (Color::Red, "✕"),
             };
-            let reason = assessment
-                .notes
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("—");
-            let confidence = if score >= 72 {
-                "High"
-            } else if score >= 55 {
-                "Med"
-            } else {
-                "Low"
-            };
-            let (label_color, badge) = match &assessment.signal {
-                TradeSignal::GoodEntry => (Color::Green, "★ Best now"),
-                TradeSignal::Watchlist => (Color::Yellow, "◉ Watch"),
-                TradeSignal::Avoid => (Color::Red, "✕ High risk"),
-            };
-            let text = Line::from(vec![
-                Span::styled(
-                    format!(" 🔍 Top Candidate: {symbol}  "),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(badge, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
-                Span::raw(format!("  Score: {score}/100  |  Confidence: {confidence}  |  {risk_label}  |  {reason}")),
-            ]);
-            Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL))
+            let reason = assessment.notes.first().map(|s| s.as_str()).unwrap_or("—");
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {badge} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{symbol:<12}"), Style::default().fg(color)),
+                Span::raw(format!(" {score:>3}/100  {reason}")),
+            ]));
         }
-    };
+        if candidates.len() > max_rows.saturating_sub(1) {
+            lines.push(Line::from(Span::styled(
+                format!(" ... +{} more", candidates.len() - max_rows.saturating_sub(1)),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    let content = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL));
     frame.render_widget(content, area);
 }
 
