@@ -63,6 +63,7 @@ pub struct BotConfig {
     pub router_models: Vec<String>,
     pub execution_mode: String,
     pub auth_mode: String,
+    pub project_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +167,7 @@ impl Default for BotConfig {
             router_models: vec![],
             execution_mode: "auto".to_string(),
             auth_mode: "both".to_string(),
+            project_path: "".to_string(),
         }
     }
 }
@@ -241,6 +243,16 @@ pub fn bot_position_file_path() -> PathBuf {
 
 pub fn trade_history_file_path() -> PathBuf {
     app_data_dir().join("trade_history.json")
+}
+
+pub fn bot_state_file_path() -> Option<PathBuf> {
+    let cfg = active_config_opt()?;
+    let project_path = cfg.bot.project_path.trim();
+    if project_path.is_empty() {
+        return None;
+    }
+    let resolved = resolve_path(project_path);
+    Some(resolved.join(".meteora_portfolio_state.json"))
 }
 
 pub fn resolve_path(path_like: &str) -> PathBuf {

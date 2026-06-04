@@ -679,6 +679,7 @@ impl App {
 
     /// Returns the highest-scoring pair from filtered results along with its assessment.
     /// Returns None if no pair has complete-enough data to recommend.
+    #[allow(dead_code)]
     pub fn top_candidate(&self) -> Option<(&PairData, &PairAssessment)> {
         self.top_candidates().into_iter().next()
     }
@@ -1401,6 +1402,80 @@ fn save_bot_position(position: Option<&BotPosition>) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&store)
         .map_err(|err| format!("serialize bot position gagal: {err}"))?;
     fs::write(path, json).map_err(|err| format!("write bot position gagal: {err}"))
+}
+
+// --- Bot State Import ---
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct BotStateFile {
+    metrics: Option<BotStateMetrics>,
+    positions: Option<BotStatePositions>,
+    updated_at: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct BotStateMetrics {
+    balance_usd: Option<f64>,
+    pnl_usd: Option<f64>,
+    pnl_pct_change: Option<f64>,
+    total_deposit_usd: Option<f64>,
+    total_fee_earned_usd: Option<f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct BotStatePositions {
+    dlmm_open: Option<HashMap<String, BotDlmmPosition>>,
+    damm_closed: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct BotDlmmPosition {
+    pool_name: Option<String>,
+    pool_address: Option<String>,
+    liquidity_usd: Option<f64>,
+    pnl_usd: Option<f64>,
+    fee_usd: Option<f64>,
+    price: Option<f64>,
+}
+
+fn load_bot_state() -> Option<BotStateFile> {
+    let path = config::bot_state_file_path()?;
+    let raw = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn import_from_bot() -> Result<String, String> {
+    let state = load_bot_state().ok_or("Bot state file not found. Set bot.project_path in config.")?;
+
+    let mut summary_parts = Vec::new();
+
+    // Report metrics summary
+    if let Some(m) = &state.metrics {
+        let bal = m.balance_usd.unwrap_or(0.0);
+        let pnl = m.pnl_usd.unwrap_or(0.0);
+        let fee = m.total_fee_earned_usd.unwrap_or(0.0);
+        summary_parts.push(format!("Balance: ${bal:.2}, PnL: ${pnl:.2}, Fees: ${fee:.2}"));
+    }
+
+    // Count open positions
+    if let Some(pos) = &state.positions {
+        if let Some(dlmm) = &pos.dlmm_open {
+            let open_count = dlmm.len();
+            if open_count > 0 {
+                summary_parts.push(format!("{open_count} open position(s)"));
+            }
+        }
+    }
+
+    if summary_parts.is_empty() {
+        return Ok("No data found in bot state.".to_string());
+    }
+
+    Ok(format!("Bot sync: {}", summary_parts.join(" | ")))
 }
 
 fn load_trade_history() -> Vec<TradeRecord> {

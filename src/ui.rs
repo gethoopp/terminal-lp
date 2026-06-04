@@ -748,6 +748,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("  r             Reverse sort direction"),
         Line::from("  f             Cycle DEX filter (All/Meteora/Raydium/Orca/PumpSwap)"),
         Line::from("  s             Enter search mode (type token name/symbol, Enter to keep)"),
+        Line::from("  S             Sync data dari Meteora bot (import status)"),
         Line::from("  w             Toggle selected pair in watchlist (persisted local JSON)"),
         Line::from("  W             Toggle watchlist-only mode"),
         Line::from("  b             Toggle bot mode ON/OFF"),

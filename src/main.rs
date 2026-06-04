@@ -329,6 +329,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                     KeyCode::Char('s') => {
                         app.start_search();
                     }
+                    KeyCode::Char('S') => {
+                        match app::import_from_bot() {
+                            Ok(msg) => app.set_warning(msg),
+                            Err(e) => app.set_warning(e),
+                        }
+                    }
                     KeyCode::Char('g') | KeyCode::Char('G') => {
                         app.toggle_degen_mode();
                         // Refetch with the appropriate data source for the new mode
