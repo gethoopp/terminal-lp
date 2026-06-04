@@ -198,6 +198,7 @@ pub struct BotOpenInput {
     pub symbol: String,
     pub base_mint: Option<String>,
     pub quote_mint: Option<String>,
+    pub input_mint: Option<String>, // None = let bot decide, Some = explicit input token
     pub entry_price: f64,
     pub take_profit_pct: f64,
     pub stop_loss_pct: f64,
@@ -260,6 +261,7 @@ pub struct App {
     pub bot_take_profit_pct: f64,
     pub bot_stop_loss_pct: f64,
     pub bot_position_size_usd: f64,
+    pub bot_use_sol_input: bool, // true = enter with SOL, false = enter with base token
     pub bot_active_position: Option<BotPosition>,
     pub bot_status: String,
     pub is_loading: bool,
@@ -319,6 +321,7 @@ impl App {
             bot_take_profit_pct: 5.0,
             bot_stop_loss_pct: 2.0,
             bot_position_size_usd: 25.0,
+            bot_use_sol_input: true, // default: enter with SOL
             bot_active_position: active_bot_position,
             bot_status,
             is_loading: true,
@@ -743,6 +746,12 @@ impl App {
         self.show_help = !self.show_help;
     }
 
+    pub fn toggle_input_mode(&mut self) {
+        self.bot_use_sol_input = !self.bot_use_sol_input;
+        let mode = if self.bot_use_sol_input { "SOL" } else { "Token (quote)" };
+        self.set_warning(format!("Bot input mode: {mode}"));
+    }
+
     pub fn toggle_portfolio(&mut self) {
         self.show_portfolio = !self.show_portfolio;
     }
@@ -848,6 +857,12 @@ impl App {
                 .to_string(),
             base_mint: pair.base_token.address.clone(),
             quote_mint: pair.quote_token.address.clone(),
+            // input_mint: SOL if bot_use_sol_input, else use quote token (what user holds)
+            input_mint: if self.bot_use_sol_input {
+                Some("So11111111111111111111111111111111111111112".to_string())
+            } else {
+                pair.quote_token.address.clone()
+            },
             entry_price,
             take_profit_pct: self.bot_take_profit_pct,
             stop_loss_pct: self.bot_stop_loss_pct,

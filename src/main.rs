@@ -299,6 +299,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                         app.toggle_watchlist_only();
                     }
                     KeyCode::Char('b') => app.toggle_bot_enabled(),
+                    KeyCode::Char('i') | KeyCode::Char('I') => app.toggle_input_mode(),
                     KeyCode::Char('p') => {
                         if bot_in_flight {
                             app.set_warning(String::from("Bot action still running"));
@@ -580,6 +581,7 @@ async fn execute_bot_open(
         "symbol": payload.symbol,
         "baseMint": payload.base_mint,
         "quoteMint": payload.quote_mint,
+        "inputMint": payload.input_mint,
         "entryPrice": payload.entry_price,
         "sizeUsd": payload.position_size_usd,
         "takeProfitPct": payload.take_profit_pct,

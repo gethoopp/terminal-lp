@@ -612,6 +612,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" watchlist only  "),
         Span::styled("b", Style::default().fg(Color::Cyan)),
         Span::raw(" bot on/off  "),
+        Span::styled("i", Style::default().fg(Color::Cyan)),
+        Span::raw(" input mode  "),
         Span::styled("p", Style::default().fg(Color::Cyan)),
         Span::raw(" place  "),
         Span::styled("t", Style::default().fg(Color::Cyan)),
@@ -682,6 +684,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(Color::DarkGray)
         },
+    ));
+    spans.push(Span::raw("  Input: "));
+    spans.push(Span::styled(
+        if app.bot_use_sol_input { "SOL" } else { "Token" },
+        Style::default().fg(Color::Yellow),
     ));
 
     if !app.search_query.is_empty() {
