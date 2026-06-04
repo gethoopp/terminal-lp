@@ -305,7 +305,7 @@ impl App {
             filtered_pairs: Vec::new(),
             sort_column: SortColumn::Change24h,
             sort_direction: SortDirection::Descending,
-            dex_filter: DexFilter::Meteora,
+            dex_filter: DexFilter::All,
             selected_index: 0,
             status_message: String::from("Initializing..."),
             last_update: String::from("--"),

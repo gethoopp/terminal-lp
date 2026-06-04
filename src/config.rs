@@ -115,7 +115,7 @@ impl Default for ApiConfig {
         Self {
             http_timeout_secs: 15,
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex".to_string(),
-            queries: vec!["meteora", "SOL", "USDC", "BONK", "WIF", "JUP"]
+            queries: vec!["SOL", "USDC", "BONK", "WIF", "JUP", "RAY"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
