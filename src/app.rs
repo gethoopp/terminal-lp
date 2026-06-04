@@ -538,6 +538,27 @@ impl App {
             .map(|&i| &self.pairs[i])
     }
 
+    /// Returns the highest-scoring pair from filtered results along with its assessment.
+    /// Returns None if no pair has complete-enough data to recommend.
+    pub fn top_candidate(&self) -> Option<(&PairData, &PairAssessment)> {
+        self.filtered_pairs
+            .iter()
+            .filter_map(|&idx| {
+                let pair = self.pairs.get(idx)?;
+                let assessment = self.assessments.get(idx)?;
+                // Guardrail: skip pairs missing critical data
+                let has_price = pair.price_usd.is_some();
+                let has_liq = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0) > 0.0;
+                let has_volume = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0) > 0.0;
+                if !has_price || !has_liq || !has_volume {
+                    return None;
+                }
+                Some((idx, pair, assessment))
+            })
+            .max_by_key(|(_, _, a)| a.score)
+            .map(|(_, pair, assessment)| (pair, assessment))
+    }
+
     pub fn selected_assessment(&self) -> Option<PairAssessment> {
         self.filtered_pairs
             .get(self.selected_index)

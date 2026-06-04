@@ -31,13 +31,15 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),     // table
+            Constraint::Length(3),  // top candidate
             Constraint::Length(15), // analysis
         ])
         .split(main_layout[1]);
 
     render_header(frame, main_layout[0], app);
     render_table(frame, body_layout[0], app);
-    render_analysis(frame, body_layout[1], app);
+    render_top_candidate(frame, body_layout[1], app);
+    render_analysis(frame, body_layout[2], app);
     render_footer(frame, main_layout[2], app);
 }
 
@@ -540,6 +542,62 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             .style(Style::default().fg(Color::DarkGray))
     };
 
+    frame.render_widget(content, area);
+}
+
+fn render_top_candidate(frame: &mut Frame, area: Rect, app: &App) {
+    let content = match app.top_candidate() {
+        None => {
+            let msg = if app.filtered_pairs.is_empty() {
+                " 🔍 Top Candidate: No qualified candidate — no pairs match current filters"
+            } else {
+                " 🔍 Top Candidate: No qualified candidate right now (data incomplete or score too low)"
+            };
+            Paragraph::new(msg)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL))
+        }
+        Some((pair, assessment)) => {
+            let symbol = pair
+                .base_token
+                .symbol
+                .as_deref()
+                .unwrap_or("?");
+            let score = assessment.score;
+            let risk_label = match &assessment.signal {
+                TradeSignal::GoodEntry => "Low-Med Risk",
+                TradeSignal::Watchlist => "Med Risk",
+                TradeSignal::Avoid => "High Risk",
+            };
+            let reason = assessment
+                .notes
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("—");
+            let confidence = if score >= 72 {
+                "High"
+            } else if score >= 55 {
+                "Med"
+            } else {
+                "Low"
+            };
+            let (label_color, badge) = match &assessment.signal {
+                TradeSignal::GoodEntry => (Color::Green, "★ Best now"),
+                TradeSignal::Watchlist => (Color::Yellow, "◉ Watch"),
+                TradeSignal::Avoid => (Color::Red, "✕ High risk"),
+            };
+            let text = Line::from(vec![
+                Span::styled(
+                    format!(" 🔍 Top Candidate: {symbol}  "),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(badge, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  Score: {score}/100  |  Confidence: {confidence}  |  {risk_label}  |  {reason}")),
+            ]);
+            Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL))
+        }
+    };
     frame.render_widget(content, area);
 }
 
