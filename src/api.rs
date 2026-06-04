@@ -360,56 +360,101 @@ pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResul
     })
 }
 
-/// Fetch degen pairs: uses the DexScreener token-boosts endpoint to find recently
-/// boosted Solana tokens, then fetches their pair data. This surfaces new/trending
-/// tokens that normal keyword queries miss.
+/// Fetch degen pairs: combines DexScreener token-boosts and token-profiles endpoints
+/// to find recently boosted/profiled Solana tokens, then fetches their pair data.
+/// This surfaces new/trending tokens that normal keyword queries miss.
 pub async fn fetch_degen_pairs(client: &reqwest::Client) -> Result<FetchResult, String> {
     let api_cfg = &config::active_config().api;
 
-    // 1. Fetch top boosted token addresses on Solana
-    let boosts_url = "https://api.dexscreener.com/token-boosts/latest/v1";
-    let boosts_resp = client
-        .get(boosts_url)
-        .header("User-Agent", "volatile-scanner/0.1")
-        .send()
-        .await
-        .map_err(|e| format!("boosts request failed: {e}"))?;
-
-    let boosts_body = boosts_resp
-        .text()
-        .await
-        .map_err(|e| format!("boosts read: {e}"))?;
-
     #[derive(serde::Deserialize)]
-    struct BoostItem {
+    struct TokenItem {
         #[serde(rename = "chainId")]
         chain_id: String,
         #[serde(rename = "tokenAddress")]
         token_address: String,
     }
 
-    let boosts: Vec<BoostItem> =
-        serde_json::from_str(&boosts_body).unwrap_or_default();
+    let mut all_addresses: Vec<String> = Vec::new();
+    let mut warnings = Vec::new();
 
-    let token_addresses: Vec<String> = boosts
-        .into_iter()
-        .filter(|b| b.chain_id == "solana")
-        .map(|b| b.token_address)
-        .take(30)
-        .collect();
-
-    if token_addresses.is_empty() {
-        return Ok(FetchResult { pairs: vec![], warnings: vec!["No boosted tokens found".to_string()] });
+    // 1. Fetch from token-boosts endpoint (paid promotions)
+    let boosts_url = "https://api.dexscreener.com/token-boosts/latest/v1";
+    if let Ok(resp) = client
+        .get(boosts_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            let boosts: Vec<TokenItem> = serde_json::from_str(&body).unwrap_or_default();
+            for item in boosts {
+                if item.chain_id == "solana" && !all_addresses.contains(&item.token_address) {
+                    all_addresses.push(item.token_address);
+                }
+            }
+        }
     }
 
-    // 2. Batch fetch pairs for those tokens (DexScreener allows comma-separated addresses)
-    let chunks: Vec<String> = token_addresses
+    // 2. Fetch from token-profiles endpoint (tokens with custom profiles)
+    let profiles_url = "https://api.dexscreener.com/token-profiles/latest/v1";
+    if let Ok(resp) = client
+        .get(profiles_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            let profiles: Vec<TokenItem> = serde_json::from_str(&body).unwrap_or_default();
+            for item in profiles {
+                if item.chain_id == "solana" && !all_addresses.contains(&item.token_address) {
+                    all_addresses.push(item.token_address);
+                }
+            }
+        }
+    }
+
+    // 3. Also fetch trending pairs from search for popular new tokens
+    let trending_queries = ["pump", "meme", "pepe", "doge", "cat", "ai"];
+    for query in trending_queries {
+        let search_url = format!("https://api.dexscreener.com/latest/dex/search?q={query}");
+        if let Ok(resp) = client
+            .get(&search_url)
+            .header("User-Agent", "volatile-scanner/0.1")
+            .send()
+            .await
+        {
+            if let Ok(body) = resp.text().await {
+                if let Ok(data) = serde_json::from_str::<DexResponse>(&body) {
+                    for pair in data.pairs.unwrap_or_default() {
+                        if pair.chain_id == "solana" {
+                            if let Some(addr) = &pair.base_token.address {
+                                if !all_addresses.contains(addr) {
+                                    all_addresses.push(addr.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+    }
+
+    if all_addresses.is_empty() {
+        return Ok(FetchResult { pairs: vec![], warnings: vec!["No degen tokens found".to_string()] });
+    }
+
+    // Take up to 50 unique addresses
+    all_addresses.truncate(50);
+
+    // 4. Batch fetch pairs for those tokens
+    let chunks: Vec<String> = all_addresses
         .chunks(10)
         .map(|c| c.join(","))
         .collect();
 
     let mut all_pairs: Vec<PairData> = Vec::new();
-    let mut warnings = Vec::new();
+    let mut seen_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for chunk in &chunks {
         let url = format!("https://api.dexscreener.com/latest/dex/tokens/{chunk}");
@@ -424,7 +469,11 @@ pub async fn fetch_degen_pairs(client: &reqwest::Client) -> Result<FetchResult, 
                     if let Ok(data) = serde_json::from_str::<DexResponse>(&body) {
                         for pair in data.pairs.unwrap_or_default() {
                             if pair.chain_id == "solana" {
-                                all_pairs.push(pair);
+                                let key = pair.pair_address.clone().unwrap_or_default();
+                                if !key.is_empty() && !seen_pairs.contains(&key) {
+                                    seen_pairs.insert(key);
+                                    all_pairs.push(pair);
+                                }
                             }
                         }
                     }
@@ -433,6 +482,10 @@ pub async fn fetch_degen_pairs(client: &reqwest::Client) -> Result<FetchResult, 
             Err(e) => warnings.push(format!("token fetch failed: {e}")),
         }
         sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+    }
+
+    if !warnings.is_empty() {
+        warnings.insert(0, format!("Fetched {} unique degen pairs", all_pairs.len()));
     }
 
     Ok(FetchResult { pairs: all_pairs, warnings })
