@@ -1,6 +1,5 @@
 use crate::config;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -155,6 +154,7 @@ async fn search_pairs_with_retry(
     Err(last_error)
 }
 
+#[allow(dead_code)]
 fn pair_identity(pair: &PairData) -> String {
     pair.pair_address
         .clone()
@@ -273,29 +273,70 @@ async fn fetch_from_jupiter_fallback(client: &reqwest::Client) -> Result<Vec<Pai
 pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResult, String> {
     let api_cfg = &config::active_config().api;
 
-    let mut best_by_pair: HashMap<String, PairData> = HashMap::new();
+    let mut all_addresses: Vec<String> = Vec::new();
     let mut warnings = Vec::new();
-    let queries = api_cfg.queries.clone();
 
+    // 1. Fetch from token-boosts endpoint (trending tokens)
+    let boosts_url = "https://api.dexscreener.com/token-boosts/top/v1";
+    if let Ok(resp) = client
+        .get(boosts_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            #[derive(serde::Deserialize)]
+            struct TokenItem {
+                #[serde(rename = "chainId")]
+                chain_id: String,
+                #[serde(rename = "tokenAddress")]
+                token_address: String,
+            }
+            let boosts: Vec<TokenItem> = serde_json::from_str(&body).unwrap_or_default();
+            for item in boosts {
+                if item.chain_id == "solana" && !all_addresses.contains(&item.token_address) {
+                    all_addresses.push(item.token_address);
+                }
+            }
+        }
+    }
+
+    // 2. Fetch from token-boosts latest
+    let boosts_latest_url = "https://api.dexscreener.com/token-boosts/latest/v1";
+    if let Ok(resp) = client
+        .get(boosts_latest_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            #[derive(serde::Deserialize)]
+            struct TokenItem {
+                #[serde(rename = "chainId")]
+                chain_id: String,
+                #[serde(rename = "tokenAddress")]
+                token_address: String,
+            }
+            let boosts: Vec<TokenItem> = serde_json::from_str(&body).unwrap_or_default();
+            for item in boosts {
+                if item.chain_id == "solana" && !all_addresses.contains(&item.token_address) {
+                    all_addresses.push(item.token_address);
+                }
+            }
+        }
+    }
+
+    // 3. Also search for established Solana tokens
+    let queries = api_cfg.queries.clone();
     for (idx, query) in queries.iter().enumerate() {
         match search_pairs_with_retry(client, query, api_cfg.max_retries).await {
             Ok(pairs) => {
                 debug!(query = %query, pairs = pairs.len(), "dexscreener query success");
                 for pair in pairs {
                     if pair.chain_id == "solana" {
-                        let key = pair_identity(&pair);
-                        let incoming_vol = pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
-
-                        match best_by_pair.get(&key) {
-                            Some(existing) => {
-                                let existing_vol =
-                                    existing.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
-                                if incoming_vol > existing_vol {
-                                    best_by_pair.insert(key, pair);
-                                }
-                            }
-                            None => {
-                                best_by_pair.insert(key, pair);
+                        if let Some(addr) = &pair.base_token.address {
+                            if !all_addresses.contains(addr) {
+                                all_addresses.push(addr.clone());
                             }
                         }
                     }
@@ -306,58 +347,77 @@ pub async fn fetch_volatile_pairs(client: &reqwest::Client) -> Result<FetchResul
                 warnings.push(format!("search '{query}' failed: {e}"));
             }
         }
-
         if idx + 1 < queries.len() {
             sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
         }
     }
 
-    let mut all_pairs: Vec<PairData> = best_by_pair.into_values().collect();
-
-    all_pairs.sort_by(|a, b| {
-        let vol_a = a.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
-        let vol_b = b.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
-        vol_b
-            .partial_cmp(&vol_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    all_pairs.truncate(api_cfg.top_pairs_by_volume);
-    all_pairs.sort_by(|a, b| {
-        let change_a = a
-            .price_change
-            .as_ref()
-            .and_then(|pc| pc.h24)
-            .map(|v| v.abs())
-            .unwrap_or(0.0);
-        let change_b = b
-            .price_change
-            .as_ref()
-            .and_then(|pc| pc.h24)
-            .map(|v| v.abs())
-            .unwrap_or(0.0);
-        change_b
-            .partial_cmp(&change_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    all_pairs.truncate(api_cfg.top_pairs_final);
-
-    if all_pairs.is_empty() && api_cfg.jupiter_enabled {
+    if all_addresses.is_empty() && api_cfg.jupiter_enabled {
         match fetch_from_jupiter_fallback(client).await {
             Ok(jupiter_pairs) => {
                 warnings.push("DexScreener unavailable, using Jupiter fallback quote".to_string());
-                all_pairs = jupiter_pairs;
+                return Ok(FetchResult { pairs: jupiter_pairs, warnings });
             }
-            Err(err) => {
-                warnings.push(format!("Jupiter fallback failed: {err}"));
+            Err(e) => {
+                warnings.push(format!("Jupiter fallback failed: {e}"));
             }
         }
     }
 
-    Ok(FetchResult {
-        pairs: all_pairs,
-        warnings,
-    })
+    // Take up to 80 unique addresses
+    all_addresses.truncate(80);
+
+    // 4. Batch fetch pairs for those tokens
+    let chunks: Vec<String> = all_addresses
+        .chunks(10)
+        .map(|c| c.join(","))
+        .collect();
+
+    let mut all_pairs: Vec<PairData> = Vec::new();
+    let mut seen_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for chunk in &chunks {
+        let url = format!("https://api.dexscreener.com/latest/dex/tokens/{chunk}");
+        match client
+            .get(&url)
+            .header("User-Agent", "volatile-scanner/0.1")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(body) = resp.text().await {
+                    if let Ok(data) = serde_json::from_str::<DexResponse>(&body) {
+                        for pair in data.pairs.unwrap_or_default() {
+                            if pair.chain_id == "solana" {
+                                let key = pair.pair_address.clone().unwrap_or_default();
+                                if !key.is_empty() && !seen_pairs.contains(&key) {
+                                    seen_pairs.insert(key);
+                                    all_pairs.push(pair);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => warnings.push(format!("token fetch failed: {e}")),
+        }
+        sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+    }
+
+    // Sort by volume
+    all_pairs.sort_by(|a, b| {
+        let vol_a = a.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+        let vol_b = b.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0);
+        vol_b.partial_cmp(&vol_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    all_pairs.truncate(api_cfg.top_pairs_final);
+
+    if !warnings.is_empty() {
+        warnings.insert(0, format!("Fetched {} Solana pairs from DexScreener", all_pairs.len()));
+    }
+
+    Ok(FetchResult { pairs: all_pairs, warnings })
 }
 
 /// Fetch degen pairs: combines DexScreener token-boosts and token-profiles endpoints
