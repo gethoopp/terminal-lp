@@ -570,7 +570,11 @@ fn render_top_candidate(frame: &mut Frame, area: Rect, app: &App) {
                 TradeSignal::Watchlist => (Color::Yellow, "◉"),
                 TradeSignal::Avoid => (Color::Red, "✕"),
             };
-            let reason = assessment.notes.first().map(|s| s.as_str()).unwrap_or("—");
+            let reason = if !assessment.bias_summary.is_empty() {
+                assessment.bias_summary.as_str()
+            } else {
+                assessment.notes.first().map(|s| s.as_str()).unwrap_or("—")
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {badge} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{symbol:<12}"), Style::default().fg(color)),

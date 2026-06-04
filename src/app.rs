@@ -1275,7 +1275,7 @@ fn pressure_bias_summary(pair: &PairData) -> String {
     }
 
     format!(
-        "Tekanan beli/jual relatif seimbang (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol}."
+        "Tekanan seimbang (buy {buys:.1} vs sell {sells:.1}) pada {base_symbol}/{quote_symbol} -> bisa pegang keduanya atau tunggu sinyal lebih jelas."
     )
 }
 
