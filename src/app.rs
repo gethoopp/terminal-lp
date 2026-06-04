@@ -272,7 +272,7 @@ impl App {
             filtered_pairs: Vec::new(),
             sort_column: SortColumn::Change24h,
             sort_direction: SortDirection::Descending,
-            dex_filter: DexFilter::All,
+            dex_filter: DexFilter::Meteora,
             selected_index: 0,
             status_message: String::from("Initializing..."),
             last_update: String::from("--"),
@@ -1589,7 +1589,7 @@ mod tests {
     fn sample_pair(symbol: &str, volume: f64, liquidity: f64) -> PairData {
         PairData {
             chain_id: "solana".to_string(),
-            dex_id: "raydium".to_string(),
+            dex_id: "meteora".to_string(),
             base_token: TokenInfo {
                 name: Some(symbol.to_string()),
                 symbol: Some(symbol.to_string()),
