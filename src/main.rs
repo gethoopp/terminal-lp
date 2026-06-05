@@ -1166,6 +1166,7 @@ mod tests {
             pair_created_at: Some(0),
             pair_address: Some("pair".to_string()),
             url: Some("https://dexscreener.com".to_string()),
+            boosts: None,
         }
     }
 

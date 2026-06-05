@@ -1888,6 +1888,7 @@ mod tests {
             pair_created_at: Some(0),
             pair_address: Some(format!("pair-{symbol}")),
             url: Some("https://dexscreener.com".to_string()),
+            boosts: None,
         }
     }
 
@@ -2068,6 +2069,7 @@ mod tests {
             pair_created_at: None,
             pair_address: Some("emp".to_string()),
             url: None,
+            boosts: None,
         };
 
         let assessed = assess_pair(&pair);

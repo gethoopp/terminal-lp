@@ -36,6 +36,7 @@ pub struct PairData {
     #[serde(rename = "pairAddress")]
     pub pair_address: Option<String>,
     pub url: Option<String>,
+    pub boosts: Option<BoostsData>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +80,11 @@ pub struct VolumeData {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LiquidityData {
     pub usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BoostsData {
+    pub active: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +224,7 @@ fn jupiter_fallback_pair(quote: &JupiterQuoteResponse) -> Option<PairData> {
             api_cfg.jupiter_input_mint, api_cfg.jupiter_output_mint
         )),
         url: Some("https://jup.ag/".to_string()),
+        boosts: None,
     })
 }
 
@@ -498,6 +505,81 @@ pub async fn fetch_degen_pairs(client: &reqwest::Client) -> Result<FetchResult, 
             }
         }
         sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+    }
+
+    // 4. Fetch from trending metas (new endpoint) — surfaces trending sectors on Solana
+    let metas_url = "https://api.dexscreener.com/metas/trending/v1";
+    if let Ok(resp) = client
+        .get(metas_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            #[derive(serde::Deserialize)]
+            struct MetaItem {
+                slug: Option<String>,
+            }
+            let metas: Vec<MetaItem> = serde_json::from_str(&body).unwrap_or_default();
+            // Fetch pairs for top 3 trending metas
+            for meta in metas.iter().take(3) {
+                if let Some(slug) = &meta.slug {
+                    let meta_url = format!("https://api.dexscreener.com/metas/meta/v1/{slug}");
+                    if let Ok(r) = client.get(&meta_url).header("User-Agent", "volatile-scanner/0.1").send().await {
+                        if let Ok(b) = r.text().await {
+                            #[derive(serde::Deserialize)]
+                            struct MetaDetail { pairs: Option<Vec<MetaPair>> }
+                            #[derive(serde::Deserialize)]
+                            struct MetaPair {
+                                #[serde(rename = "chainId")] chain_id: Option<String>,
+                                #[serde(rename = "baseToken")] base_token: Option<MetaToken>,
+                            }
+                            #[derive(serde::Deserialize)]
+                            struct MetaToken { address: Option<String> }
+                            if let Ok(detail) = serde_json::from_str::<MetaDetail>(&b) {
+                                for pair in detail.pairs.unwrap_or_default() {
+                                    if pair.chain_id.as_deref() == Some("solana") {
+                                        if let Some(addr) = pair.base_token.and_then(|t| t.address) {
+                                            if !all_addresses.contains(&addr) {
+                                                all_addresses.push(addr);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sleep(Duration::from_millis(api_cfg.query_delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    // 5. Fetch recently updated token profiles (new endpoint)
+    let recent_url = "https://api.dexscreener.com/token-profiles/recent-updates/v1";
+    if let Ok(resp) = client
+        .get(recent_url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.text().await {
+            #[derive(serde::Deserialize)]
+            struct ProfileItem {
+                #[serde(rename = "chainId")] chain_id: Option<String>,
+                #[serde(rename = "tokenAddress")] token_address: Option<String>,
+            }
+            let profiles: Vec<ProfileItem> = serde_json::from_str(&body).unwrap_or_default();
+            for item in profiles {
+                if item.chain_id.as_deref() == Some("solana") {
+                    if let Some(addr) = item.token_address {
+                        if !all_addresses.contains(&addr) {
+                            all_addresses.push(addr);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if all_addresses.is_empty() {

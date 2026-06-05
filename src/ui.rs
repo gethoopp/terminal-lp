@@ -350,6 +350,7 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
         let mcap = pair.market_cap.unwrap_or(0.0);
         let fdv = pair.fdv.unwrap_or(0.0);
         let fdv_mcap_ratio = app.selected_fdv_mcap_ratio();
+        let boosts_active = pair.boosts.as_ref().and_then(|b| b.active).unwrap_or(0);
         let shown_notes = notes.iter().take(3).collect::<Vec<_>>();
         let hidden_count = notes.len().saturating_sub(shown_notes.len());
         let is_watchlisted = app.selected_in_watchlist();
@@ -389,10 +390,11 @@ fn render_analysis(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled("Valuasi: ", Style::default().fg(Color::Cyan)),
                 Span::raw(format!(
-                    "MCap {} | FDV {} | FDV/MCap {}",
+                    "MCap {} | FDV {} | FDV/MCap {} | Boosts: {}",
                     format_usd(mcap),
                     format_usd(fdv),
-                    ratio_text
+                    ratio_text,
+                    if boosts_active > 0 { format!("{boosts_active} aktif 🔥") } else { "--".to_string() }
                 )),
             ]),
             Line::from(vec![
