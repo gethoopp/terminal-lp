@@ -23,6 +23,7 @@ use tokio::sync::mpsc::{self, error::TryRecvError, UnboundedReceiver, UnboundedS
 use tracing::{error, info, warn};
 
 type FetchMessage = Result<api::FetchResult, String>;
+type MeteoraFetchMessage = Result<api::MeteoraFetchResult, String>;
 type BotMessage = Result<BotTaskResult, String>;
 const METEORA_APP_URL: &str = "https://app.meteora.ag/";
 
@@ -152,9 +153,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
     let (bot_tx, mut bot_rx) = mpsc::unbounded_channel::<BotMessage>();
     let (yield_tx, mut yield_rx) =
         mpsc::unbounded_channel::<HashMap<String, Vec<yield_mod::YieldInfo>>>();
+    let (meteora_tx, mut meteora_rx) = mpsc::unbounded_channel::<MeteoraFetchMessage>();
     let mut fetch_in_flight = false;
     let mut bot_in_flight = false;
     let mut yield_in_flight = false;
+    let mut meteora_in_flight = false;
     let export_dir = config::resolve_path(&cfg.export.directory);
 
     // Initial data fetch in background to keep UI responsive.
@@ -174,6 +177,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
         drain_fetch_results(&mut fetch_rx, &mut app, &mut fetch_in_flight);
         drain_bot_results(&mut bot_rx, &mut app, &mut bot_in_flight);
         drain_yield_results(&mut yield_rx, &mut app, &mut yield_in_flight);
+        drain_meteora_results(&mut meteora_rx, &mut app, &mut meteora_in_flight);
         terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Auto-refresh
@@ -343,6 +347,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::erro
                             last_refresh = Instant::now();
                         }
                     }
+                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                        app.toggle_meteora_mode();
+                        if app.meteora_mode && !meteora_in_flight {
+                            request_meteora_fetch(&client, &meteora_tx, &mut meteora_in_flight, &mut app);
+                        }
+                    }
                     KeyCode::Char('R') => {
                         // Force refresh
                         if !fetch_in_flight {
@@ -402,6 +412,59 @@ fn request_fetch(
         tokio::spawn(async move {
             let _ = tx.send(api::fetch_volatile_pairs(&client).await);
         });
+    }
+}
+
+fn request_meteora_fetch(
+    client: &reqwest::Client,
+    meteora_tx: &UnboundedSender<MeteoraFetchMessage>,
+    meteora_in_flight: &mut bool,
+    app: &mut App,
+) {
+    if *meteora_in_flight {
+        return;
+    }
+    *meteora_in_flight = true;
+    app.is_loading = true;
+    app.set_warning(String::from(
+        "Fetching Meteora DLMM pools (Pool Discovery API, Meridian thresholds)...",
+    ));
+    let tx = meteora_tx.clone();
+    let client = client.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(api::fetch_meteora_pools(&client).await);
+    });
+}
+
+fn drain_meteora_results(
+    meteora_rx: &mut UnboundedReceiver<MeteoraFetchMessage>,
+    app: &mut App,
+    meteora_in_flight: &mut bool,
+) {
+    loop {
+        match meteora_rx.try_recv() {
+            Ok(result) => {
+                *meteora_in_flight = false;
+                match result {
+                    Ok(data) => {
+                        if !data.warnings.is_empty() {
+                            let warnings = data.warnings.join(" | ");
+                            warn!(warnings = %warnings, "meteora fetch info");
+                        }
+                        app.update_meteora_pools(data.pools);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "meteora fetch failed");
+                        app.set_error(e);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                *meteora_in_flight = false;
+                break;
+            }
+        }
     }
 }
 

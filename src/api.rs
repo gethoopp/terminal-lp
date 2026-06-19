@@ -100,6 +100,208 @@ pub struct FetchResult {
     pub warnings: Vec<String>,
 }
 
+// ── Meteora Pool Discovery API ──────────────────────────────────────────────
+
+const METEORA_POOL_DISCOVERY_BASE: &str = "https://pool-discovery-api.datapi.meteora.ag";
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct MeteoraTokenInfo {
+    pub symbol: Option<String>,
+    pub address: Option<String>,
+    pub organic_score: Option<f64>,
+    pub market_cap: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct MeteoraDlmmParams {
+    pub bin_step: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct MeteoraRawPool {
+    pub pool_address: Option<String>,
+    pub name: Option<String>,
+    pub token_x: Option<MeteoraTokenInfo>,
+    pub token_y: Option<MeteoraTokenInfo>,
+    pub dlmm_params: Option<MeteoraDlmmParams>,
+    pub fee_pct: Option<f64>,
+    pub tvl: Option<f64>,
+    pub active_tvl: Option<f64>,
+    pub fee: Option<f64>,
+    pub volume: Option<f64>,
+    pub fee_active_tvl_ratio: Option<f64>,
+    pub volatility: Option<f64>,
+    pub base_token_holders: Option<u32>,
+    pub pool_price_change_pct: Option<f64>,
+}
+
+/// Condensed pool data ready for display and scoring.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MeteoraPairData {
+    pub pool_address: String,
+    pub name: String,
+    pub base_symbol: String,
+    pub base_mint: String,
+    pub base_organic: f64,
+    pub quote_symbol: String,
+    pub bin_step: Option<u32>,
+    pub fee_pct: f64,
+    pub tvl: f64,
+    pub active_tvl: f64,
+    pub fee_window: f64,
+    pub volume_window: f64,
+    pub fee_active_tvl_ratio: f64,
+    pub volatility: f64,
+    pub holders: u32,
+    pub mcap: f64,
+    pub organic_score: f64,
+    pub price_change_pct: f64,
+}
+
+impl MeteoraRawPool {
+    fn is_usable(&self) -> bool {
+        self.volatility.map(|v| v > 0.0 && v.is_finite()).unwrap_or(false)
+    }
+
+    fn condense(&self) -> Option<MeteoraPairData> {
+        if !self.is_usable() {
+            return None;
+        }
+        Some(MeteoraPairData {
+            pool_address: self.pool_address.clone().unwrap_or_default(),
+            name: self.name.clone().unwrap_or_default(),
+            base_symbol: self.token_x.as_ref().and_then(|t| t.symbol.clone()).unwrap_or_default(),
+            base_mint: self.token_x.as_ref().and_then(|t| t.address.clone()).unwrap_or_default(),
+            base_organic: self.token_x.as_ref().and_then(|t| t.organic_score).unwrap_or(0.0),
+            quote_symbol: self.token_y.as_ref().and_then(|t| t.symbol.clone()).unwrap_or_default(),
+            bin_step: self.dlmm_params.as_ref().and_then(|d| d.bin_step),
+            fee_pct: self.fee_pct.unwrap_or(0.0),
+            tvl: self.tvl.unwrap_or(0.0),
+            active_tvl: self.active_tvl.unwrap_or(0.0),
+            fee_window: self.fee.unwrap_or(0.0),
+            volume_window: self.volume.unwrap_or(0.0),
+            fee_active_tvl_ratio: self.fee_active_tvl_ratio.unwrap_or(0.0),
+            volatility: self.volatility.unwrap_or(0.0),
+            holders: self.base_token_holders.unwrap_or(0),
+            mcap: self.token_x.as_ref().and_then(|t| t.market_cap).unwrap_or(0.0),
+            organic_score: self.token_x.as_ref().and_then(|t| t.organic_score).unwrap_or(0.0),
+            price_change_pct: self.pool_price_change_pct.unwrap_or(0.0),
+        })
+    }
+}
+
+impl MeteoraPairData {
+    /// Meridian scoring: feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100
+    pub fn score(&self) -> f64 {
+        self.fee_active_tvl_ratio * 1000.0
+            + self.organic_score * 10.0
+            + self.volume_window / 100.0
+            + self.holders as f64 / 100.0
+    }
+}
+
+pub struct MeteoraFetchResult {
+    pub pools: Vec<MeteoraPairData>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeteoraApiResponse {
+    data: Option<Vec<MeteoraRawPool>>,
+    total: Option<u64>,
+}
+
+/// Fetch DLMM pools from the Meteora Pool Discovery API using Meridian's screening thresholds.
+pub async fn fetch_meteora_pools(client: &reqwest::Client) -> Result<MeteoraFetchResult, String> {
+    let cfg = &config::active_config().meteora;
+    let mut warnings: Vec<String> = Vec::new();
+
+    let filters = format!(
+        "base_token_has_critical_warnings=false\
+        &&quote_token_has_critical_warnings=false\
+        &&pool_type=dlmm\
+        &&base_token_market_cap>={min_mcap}\
+        &&base_token_market_cap<={max_mcap}\
+        &&base_token_holders>={min_holders}\
+        &&volume>={min_volume}\
+        &&tvl>={min_tvl}\
+        &&tvl<={max_tvl}\
+        &&dlmm_bin_step>={min_bin_step}\
+        &&dlmm_bin_step<={max_bin_step}\
+        &&fee_active_tvl_ratio>={min_fee_tvl}\
+        &&base_token_organic_score>={min_organic}",
+        min_mcap = cfg.min_mcap,
+        max_mcap = cfg.max_mcap,
+        min_holders = cfg.min_holders,
+        min_volume = cfg.min_volume,
+        min_tvl = cfg.min_tvl,
+        max_tvl = cfg.max_tvl,
+        min_bin_step = cfg.min_bin_step,
+        max_bin_step = cfg.max_bin_step,
+        min_fee_tvl = cfg.min_fee_active_tvl_ratio,
+        min_organic = cfg.min_organic,
+    );
+
+    // Percent-encode the filter string (mirrors JS encodeURIComponent)
+    let encoded: String = filters
+        .chars()
+        .flat_map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' => {
+                vec![c]
+            }
+            c => format!("%{:02X}", c as u32).chars().collect(),
+        })
+        .collect();
+
+    let url = format!(
+        "{}/pools?page_size={}&filter_by={}&timeframe={}&category={}",
+        METEORA_POOL_DISCOVERY_BASE,
+        cfg.page_size,
+        encoded,
+        cfg.timeframe,
+        cfg.category,
+    );
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "volatile-scanner/0.1")
+        .send()
+        .await
+        .map_err(|e| format!("Meteora Pool Discovery API request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("Meteora Pool Discovery API returned status: {status}"));
+    }
+
+    let body = resp.text().await.map_err(|e| format!("Meteora API read body: {e}"))?;
+    let data: MeteoraApiResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Meteora API parse error: {e}"))?;
+
+    let raw_pools = data.data.unwrap_or_default();
+    let total = data.total.unwrap_or(0);
+
+    let mut pools: Vec<MeteoraPairData> = raw_pools
+        .iter()
+        .filter_map(|p| p.condense())
+        .collect();
+
+    // Sort by Meridian score descending
+    pools.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
+
+    warnings.push(format!(
+        "Meteora Pool Discovery: {} pools screened (total on API: {})",
+        pools.len(),
+        total
+    ));
+
+    Ok(MeteoraFetchResult { pools, warnings })
+}
+
 pub fn build_http_client() -> Result<reqwest::Client, String> {
     let timeout_secs = config::active_config().api.http_timeout_secs.max(1);
     reqwest::Client::builder()

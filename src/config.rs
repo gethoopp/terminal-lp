@@ -7,6 +7,45 @@ static ACTIVE_CONFIG: OnceLock<ScannerConfig> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct MeteoraScreeningConfig {
+    pub min_fee_active_tvl_ratio: f64,
+    pub min_tvl: f64,
+    pub max_tvl: f64,
+    pub min_volume: f64,
+    pub min_organic: f64,
+    pub min_holders: u32,
+    pub min_mcap: f64,
+    pub max_mcap: f64,
+    pub min_bin_step: u32,
+    pub max_bin_step: u32,
+    pub timeframe: String,
+    pub category: String,
+    pub page_size: u32,
+}
+
+impl Default for MeteoraScreeningConfig {
+    fn default() -> Self {
+        Self {
+            // Meridian thresholds — optimised for degen coins with high fee/TVL
+            min_fee_active_tvl_ratio: 0.02,
+            min_tvl: 5_000.0,
+            max_tvl: 200_000.0,
+            min_volume: 500.0,
+            min_organic: 50.0,
+            min_holders: 200,
+            min_mcap: 50_000.0,
+            max_mcap: 15_000_000.0,
+            min_bin_step: 80,
+            max_bin_step: 125,
+            timeframe: "5m".to_string(),
+            category: "trending".to_string(),
+            page_size: 50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScannerConfig {
     pub api: ApiConfig,
     pub app: AppConfig,
@@ -14,6 +53,7 @@ pub struct ScannerConfig {
     pub alerts: AlertConfig,
     pub export: ExportConfig,
     pub logging: LoggingConfig,
+    pub meteora: MeteoraScreeningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +146,7 @@ impl Default for ScannerConfig {
                 directory: data_dir.to_string_lossy().to_string(),
                 file_name: "scanner.log".to_string(),
             },
+            meteora: MeteoraScreeningConfig::default(),
         }
     }
 }

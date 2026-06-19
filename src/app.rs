@@ -1,4 +1,4 @@
-use crate::api::PairData;
+use crate::api::{MeteoraPairData, PairData};
 use crate::config;
 use crate::rsi::RsiInfo;
 use crate::yield_mod;
@@ -273,6 +273,8 @@ pub struct App {
     alerted_pairs: HashMap<String, u64>,
     pub yields: HashMap<String, Vec<YieldInfo>>,
     pub degen_mode: bool,
+    pub meteora_mode: bool,
+    pub meteora_pools: Vec<MeteoraPairData>,
     pub trade_history: Vec<TradeRecord>,
     pub show_portfolio: bool,
     pub top_candidate: Option<TopCandidate>,
@@ -333,6 +335,8 @@ impl App {
             alerted_pairs: HashMap::new(),
             yields: HashMap::new(),
             degen_mode: false,
+            meteora_mode: false,
+            meteora_pools: Vec::new(),
             trade_history: load_trade_history(),
             show_portfolio: false,
             top_candidate: None,
@@ -342,6 +346,7 @@ impl App {
     pub fn toggle_degen_mode(&mut self) {
         self.degen_mode = !self.degen_mode;
         if self.degen_mode {
+            self.meteora_mode = false; // mutually exclusive
             self.status_message = "DEGEN MODE ON - Showing coins 4-300h old, min $30K liquidity".to_string();
             self.sort_column = SortColumn::Age;
             self.sort_direction = SortDirection::Ascending;
@@ -349,6 +354,32 @@ impl App {
             self.status_message = "DEGEN MODE OFF".to_string();
         }
         self.apply_filters();
+    }
+
+    /// Toggle Meteora mode — fetches DLMM pools from Pool Discovery API
+    /// using Meridian degen thresholds (fee/TVL >= 2%, organic >= 50, etc.)
+    pub fn toggle_meteora_mode(&mut self) {
+        self.meteora_mode = !self.meteora_mode;
+        if self.meteora_mode {
+            self.degen_mode = false; // mutually exclusive
+            self.status_message = "METEORA MODE ON - Fetching DLMM pools via Pool Discovery API (Meridian thresholds)...".to_string();
+        } else {
+            self.meteora_mode = false;
+            self.meteora_pools.clear();
+            self.status_message = "METEORA MODE OFF".to_string();
+        }
+    }
+
+    /// Called when Meteora pool fetch completes.
+    pub fn update_meteora_pools(&mut self, pools: Vec<MeteoraPairData>) {
+        let count = pools.len();
+        self.meteora_pools = pools;
+        self.status_message = format!(
+            "METEORA: {} DLMM pools (fee/TVL≥2%, organic≥50, holders≥200) — press M to toggle",
+            count
+        );
+        self.is_loading = false;
+        self.error_message = None;
     }
 
     pub fn update_yields(&mut self, yields: HashMap<String, Vec<YieldInfo>>) {
@@ -2214,7 +2245,6 @@ mod tests {
 
         assert_eq!(columns[6], "");
         assert_eq!(columns[7], "");
-
         let _ = fs::remove_dir_all(unique_dir);
     }
 
